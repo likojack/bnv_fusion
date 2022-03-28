@@ -1,0 +1,40 @@
+_class_: LitFusionRefiner
+name: "lit_fusion_refiner"
+
+feature_vector_size: 8
+train_ray_splits: 500
+voxel_size: 0.02
+min_pts_in_grid: 8
+sdf_delta_weight: 0.1
+
+use_refine: False
+use_pretrained: True
+freeze_pretrained_weights: True
+
+pretrained_model: /home/kejie/repository/fast_sdf/remote_test_sdf.ckpt
+
+volume_dir: /home/kejie/repository/fast_sdf/logs/test/2021-09-18/11-18-27/plots
+
+ray_tracer:
+  ray_max_dist: 5
+  truncated_units: 10
+
+nerf:
+  hidden_size: 256
+  num_layers: 4
+  num_encoding_fn_xyz: 1
+  num_encoding_fn_dir: 6
+  include_input_xyz: True
+  include_input_dir: True
+  xyz_agnostic: False
+  interpolate_decode: True
+  global_coords: False
+
+loss:
+  rgb_loss: 0.
+  l1_loss: 0.
+  depth_bce_loss: 1.
+  sdf_delta_loss: 1.
+  zero_level_loss: 0.
+  mask_loss: 0.
+  reg_loss: 0.

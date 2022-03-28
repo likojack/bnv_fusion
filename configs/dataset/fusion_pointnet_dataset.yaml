@@ -1,0 +1,11 @@
+data_dir: ${data_dir}  # data_dir is specified in config.yaml
+
+subdomain: "local_shapes"
+
+name: "fusion_pointnet_dataset"
+
+n_local_samples: 64
+train_batch_size: 100
+eval_batch_size: 1
+shuffle: True
+num_workers: 4

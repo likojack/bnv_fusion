@@ -1,0 +1,19 @@
+_target_package_: torch.optim
+_class_: Adam
+eps: 1e-08
+weight_decay: 0
+betas: [0.9, 0.999]
+
+lr:
+  name: base_lr
+  initial: 0.001
+  interval: epoch
+  scheduler: StepLR
+lr_scheduler:
+  step_size: 20000
+  gamma: 0.5
+  last_epoch: -1
+
+# _convert_ is hydra syntax needed to make betas parameter work, learn more here:
+# https://hydra.cc/docs/next/advanced/instantiate_objects/overview/#parameter-conversion-strategies
+_convert_: "partial"

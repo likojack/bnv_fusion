@@ -1,0 +1,46 @@
+_class_: LitFusionNet
+name: "lit_fusion_net"
+
+feature_vector_size: 16
+train_ray_splits: 200
+voxel_size: 0.04
+
+update_network:
+  depth: 2
+  contraction: 32
+  n_input_channels: 4
+  double_factor: 1.5
+
+ray_tracer:
+  ray_max_dist: 5
+
+nerf:
+  hidden_size: 256
+  num_layers: 4
+  num_encoding_fn_xyz: 1
+  num_encoding_fn_dir: 6
+  include_input_xyz: True
+  include_input_dir: True
+
+refine_net:
+  n_input_channels: 1
+  n_output_channels: 1
+  contraction: 64
+  depth: 1
+  loss:
+    name: combined
+    lambda_unc: 0.03
+    crop_fraction: 0.
+    vmin: 0.
+    vmax: 10.
+    weight_scale: 1.
+    limit: 10.
+
+loss:
+  rgb_loss: 0.
+  l1_loss: 0.
+  depth_bce_loss: 1.
+  zero_level_loss: 0.1
+  mask_loss: 1.
+  reg_loss: 0.01
+  refine_depth_loss: 1.

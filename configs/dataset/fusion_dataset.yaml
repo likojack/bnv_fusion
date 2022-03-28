@@ -1,0 +1,26 @@
+# @package _group_
+
+_target_: src.datasets.idr_dataset.IDRDataset
+
+data_dir: ${data_dir}  # data_dir is specified in config.yaml
+
+subdomain: "fusion"
+
+name: "fusion_dataset"
+img_res: [240, 320]
+train_cameras: False
+num_pixels: 1024
+scan_id: 0/2
+num_images: 300
+skip_images: 10
+sample_shift: 0
+
+downsample_scale: 0.
+downsample_mode: null # or sparse
+train_batch_size: 1
+eval_batch_size: 1
+max_eval_imgs: 1
+shuffle: True
+num_workers: 4
+first_k: 2
+max_neighbor_images: 5

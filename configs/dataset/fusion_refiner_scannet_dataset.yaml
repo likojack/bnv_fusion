@@ -1,0 +1,23 @@
+data_dir: ${data_dir}  # data_dir is specified in config.yaml
+
+subdomain: "ScanNet"
+
+name: "fusion_refiner_scannet_dataset"
+img_res: [480, 640]
+num_pixels: 5000
+scan_id: scene0575_00
+num_images: 300
+skip_images: 10
+depth_scale: 1000.
+
+downsample_scale: 0.5
+downsample_mode: null # or sparse
+train_batch_size: 1
+eval_batch_size: 1
+max_eval_imgs: 1
+shuffle: True
+num_workers: 4
+first_k: 2
+sample_shift: 0
+
+out_root: null

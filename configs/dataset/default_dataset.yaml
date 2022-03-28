@@ -1,0 +1,14 @@
+# @package _group_
+
+_target_: src.datasets.shapenet.ShapeNetDataset
+
+data_dir: ${data_dir}  # data_dir is specified in config.yaml
+
+subdomain: "ShapeNet"
+
+name: "shapenet_hierarchical"
+num_sdf_samples: 20000
+
+batch_size: 4
+shuffle: True
+num_workers: 4

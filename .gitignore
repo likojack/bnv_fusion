@@ -1,0 +1,11 @@
+/DeepSDF/
+/exps/
+/data/
+/src/investigate
+**/__pycache__
+/test_sdf/
+/logs/
+/.vscode/
+/test_*.py
+/render_visualization
+/render_out

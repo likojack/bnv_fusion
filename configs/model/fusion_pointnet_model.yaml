@@ -1,0 +1,47 @@
+_class_: LitFusionPointnet
+name: "lit_fusion_pointnet"
+
+feature_vector_size: 8
+voxel_size: 0.01
+train_split: 10000
+train_ray_splits: 1000
+
+training_global: False
+global_coords: False
+interpolate_decode: True  # use interpolation when decoding points.
+
+# for training local embedding only
+bound_max: [1, 1, 1]
+bound_min: [-1, -1, -1]
+
+min_pts_in_grid: 8
+
+point_net:
+  in_channels: 6
+
+nerf:
+  hidden_size: 256
+  num_layers: 4
+  num_encoding_fn_xyz: 1
+  num_encoding_fn_dir: 6
+  include_input_xyz: True
+  include_input_dir: True
+  interpolate_decode: True
+  global_coords: False
+  xyz_agnostic: False
+
+loss:
+  bce_loss: 1.
+  reg_loss: 0.001
+  # for end-to-end
+  depth_bce_loss: 1.
+
+ray_tracer:
+  ray_max_dist: 3
+  truncated_units: 10
+
+# for end-to-end
+sdf_delta_weight: 0.1
+freeze_pretrained_weights: True
+pretrained_model: /home/kejie/repository/fast_sdf/logs/train/2021-10-21/22-37-03/lightning_logs/version_0/checkpoints/last.ckpt
+depth_scale: 1000
