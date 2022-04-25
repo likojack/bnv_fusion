@@ -655,6 +655,7 @@ class LitFusionPointNet(pl.LightningModule):
         fine_feats,
         fine_weights
     ):
+        fine_weights = torch.clip(fine_weights / 32, max=1)
         model_feats, model_weights, model_num_hits = volume_object.query(fine_coords)
         if len(fine_coords) > 0:
             new_fine_feats, new_fine_weights = self._update(
