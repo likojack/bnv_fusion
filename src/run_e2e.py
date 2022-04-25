@@ -4,13 +4,13 @@ import numpy as np
 import os
 from omegaconf import DictConfig
 import open3d as o3d
+import open3d.core as o3c
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import pytorch_lightning as pl
 from pytorch_lightning import seed_everything
-from pytorch_lightning.callbacks import LearningRateMonitor
 
 from src.datasets import datasets
 import src.utils.geometry as geometry
@@ -229,8 +229,13 @@ class NeuralMap:
                             batch_loss[k] += split_loss_out[k]    
                 loss_for_backward.backward()
             optimizer.step()
-        mesh = self.extract_mesh()
-        mesh.export(os.path.join(self.working_dir, "after_optimize.ply"))
+        # if self.config.trainer.post_process:
+            # import subprocess
+            # out_path = mesh_out_path[:-4] + "_post_process.ply"
+            # commands = f"meshlabserver -i {mesh_out_path} -o {out_path} -s ./clean_mesh.mlx"
+            # os.system(commands)
+            # commands = commands.split(" ")
+            # subprocess.run(commands, check=True)
         # store optimized features back to the sparse_volume
         self.volume.insert(
             self.volume.active_coordinates,
@@ -267,11 +272,9 @@ class NeuralMap:
         tsdf_vol, _ = self.tsdf_vol.get_volume()
         tsdf_vol = tsdf_vol * (self.tsdf_voxel_size * 5)
         np.save(tsdf_out_path, tsdf_vol)
-        self.volume.to_tensor()
-        # save volume
-        volume_path = os.path.join(self.working_dir, self.scan_id)
-        self.volume.save(volume_path)
-
+        # self.volume.to_tensor()
+        self.volume.save(os.path.join(self.working_dir, "final"))
+        
 def track_memory():
     div_GB = 1024 * 1024 * 1024
     print("GPU status:")
@@ -301,8 +304,11 @@ def main(config: DictConfig):
         collate_fn=val_dataset.collate_fn if hasattr(val_dataset, "collate_fn") else None
     )
 
+    plots_dir = os.path.join(os.getcwd(), config.dataset.scan_id)
+    if not os.path.exists(plots_dir):
+        os.makedirs(plots_dir)
+
     # setup model
-    plots_dir = os.getcwd()
     log.info("initializing model")
     pointnet_model = LitFusionPointNet(config)
     pretrained_weights = torch.load(config.trainer.checkpoint)
@@ -342,15 +348,24 @@ def main(config: DictConfig):
             "img_path": img_path,
             "depth_path": depth_path,
         }
-        keyframes.append(meta_frame)
+        keyframes.append(meta_frame)        
         # clear memory for open3d hashmap
-        if (idx+1) % 10 == 0:
+        if (idx+1) % 2 == 0:
             torch.cuda.empty_cache()
-
+        if config.model.mode == "demo":
+            if (idx+1) % config.model.optim_interval == 0:
+                neural_map.optimize(keyframes, n_iters=config.model.optim_interval*neural_map.skip_images)
+                mesh = neural_map.extract_mesh()
+                mesh_out_path = os.path.join(neural_map.working_dir, f"{idx}.ply")
+                mesh.export(mesh_out_path)
     neural_map.optimize(
         keyframes,
-        n_iters=int(len(keyframes) * neural_map.skip_images * 2))
-
+        n_iters=int(len(keyframes))) #* neural_map.skip_images * 2))
+    mesh = neural_map.extract_mesh()
+    mesh_out_path = os.path.join(neural_map.working_dir, "final.ply")
+    mesh.export(mesh_out_path)
+    neural_map.save()
+    # neural_map.volume.save(os.path.join(neural_map.working_dir, "final"))
 
 if __name__ == "__main__":
     main()
