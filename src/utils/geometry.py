@@ -579,3 +579,24 @@ def recenter(vertices):
     center = (max_ + min_) / 2.
     vertices = vertices - center[None, :]
     return vertices, center
+
+
+def pose_spline(p0, p1, n_poses):
+    from scipy.spatial.transform import Slerp
+    slerp = Slerp(np.arange(2), Rotation.from_matrix(np.stack([p0[:3, :3], p1[:3, :3]], axis=0)))
+    weights = (np.arange(n_poses)+0.5) / n_poses
+    rots = slerp(weights).as_matrix()
+    weights = weights[:, None]
+    # quat0 = Rotation.from_matrix(p0[:3, :3]).as_quat()
+    # quat1 = Rotation.from_matrix(p1[:3, :3]).as_quat()
+    t0 = p0[:3, 3]
+    t1 = p1[:3, 3]
+    # quats = (1 - weights) * quat0[None, :] + weights * quat1[None, :]
+    ts = (1 - weights) * t0[None, :] + weights * t1[None, :]
+    out = []
+    for i in range(n_poses):
+        T_wc = np.eye(4)
+        T_wc[:3, :3] = rots[i]
+        T_wc[:3, 3] = ts[i]
+        out.append(T_wc)
+    return out
