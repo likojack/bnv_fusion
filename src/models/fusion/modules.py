@@ -3,6 +3,8 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import commentjson as json
+import tinycudann as tcnn
 
 from src.models.fusion.embedder import *
 from src.models.models import register
@@ -129,6 +131,413 @@ def get_embedding_function(
     return lambda x: positional_encoding(
         x, num_encoding_functions, include_input, log_sampling
     )
+
+
+class tcnnNeRFModel(torch.nn.Module):
+    def __init__(
+        self,
+        feat_dims,
+        hidden_size=256,
+        num_layers=4,
+        num_encoding_fn_xyz=8,
+        num_encoding_fn_dir=4,
+        include_input_xyz=True,
+        include_input_dir=True,
+        xyz_agnostic=False,
+        interpolate_decode=True,
+        global_coords=False,
+        **kwargs
+    ):
+        super(tcnnNeRFModel, self).__init__()
+        self.dim_xyz = (3 if include_input_xyz else 0) + 2 * 3 * num_encoding_fn_xyz
+        self.hidden_size = hidden_size
+        self.xyz_agnostic = xyz_agnostic
+        self.interpolate_decode = interpolate_decode
+        self.global_coords = global_coords
+        dims = [self.dim_xyz + feat_dims] + [hidden_size] * num_layers
+        self.xyz_encoding = get_embedding_function(
+            num_encoding_functions=num_encoding_fn_xyz,
+            include_input=True,
+            log_sampling=True
+        )
+        self.view_encoding = get_embedding_function(
+            num_encoding_functions=num_encoding_fn_dir,
+            include_input=True,
+            log_sampling=True
+        )
+
+        with open(kwargs['tcnn_config']) as config_file:
+            config = json.load(config_file)
+        self.model = tcnn.NetworkWithInputEncoding(
+            n_input_dims=dims[0],
+            n_output_dims=1,
+            encoding_config=config["encoding"],
+            network_config=config["network"]
+        )
+
+    def get_neighbors(self, points):
+        """
+        args: voxel_coordinates: [b, n_steps, n_samples, 3]
+        """
+        return torch.stack([
+            torch.stack(
+                [
+                    torch.floor(points[:, :, :, 0]),
+                    torch.floor(points[:, :, :, 1]),
+                    torch.floor(points[:, :, :, 2])
+                ],
+                dim=-1
+            ),
+            torch.stack(
+                [
+                    torch.ceil(points[:, :, :, 0]),
+                    torch.floor(points[:, :, :, 1]),
+                    torch.floor(points[:, :, :, 2])
+                ],
+                dim=-1
+            ),
+            torch.stack(
+                [
+                    torch.floor(points[:, :, :, 0]),
+                    torch.ceil(points[:, :, :, 1]),
+                    torch.floor(points[:, :, :, 2])
+                ],
+                dim=-1
+            ),
+            torch.stack(
+                [
+                    torch.floor(points[:, :, :, 0]),
+                    torch.floor(points[:, :, :, 1]),
+                    torch.ceil(points[:, :, :, 2])
+                ],
+                dim=-1
+            ),
+            torch.stack(
+                [
+                    torch.ceil(points[:, :, :, 0]),
+                    torch.ceil(points[:, :, :, 1]),
+                    torch.floor(points[:, :, :, 2])
+                ],
+                dim=-1
+            ),
+            torch.stack(
+                [
+                    torch.ceil(points[:, :, :, 0]),
+                    torch.floor(points[:, :, :, 1]),
+                    torch.ceil(points[:, :, :, 2])
+                ],
+                dim=-1
+            ),
+            torch.stack(
+                [
+                    torch.floor(points[:, :, :, 0]),
+                    torch.ceil(points[:, :, :, 1]),
+                    torch.ceil(points[:, :, :, 2])
+                ],
+                dim=-1
+            ),
+            torch.stack(
+                [
+                    torch.ceil(points[:, :, :, 0]),
+                    torch.ceil(points[:, :, :, 1]),
+                    torch.ceil(points[:, :, :, 2])
+                ],
+                dim=-1
+            ),
+        ], dim=1).int()
+
+    def geo_forward(self, xyz):
+        B, N, F = xyz.shape
+        out = self.model(xyz.reshape(-1, F))
+        out = out.reshape(B, N, 1)
+        return out
+
+    def forward(
+        self, x, feats, mask=None, test=False
+    ):
+        """
+        if no test:
+            x: [B, N, in_channels]
+            feats: [B, F]
+        else: feats and x is one-to-one matching
+            x: [..., 3]
+            feats: [..., F]
+        """
+        xyz = x[..., :3]  # [B, N, 3]
+        local_coords_encoded = self.xyz_encoding(xyz)
+        if test:
+            geo_in = torch.cat([local_coords_encoded, feats], dim=-1)
+            if mask is not None:
+                alpha = self.forward_with_mask(geo_in, mask)
+            else:
+                alpha = self.geo_forward(geo_in)
+            return alpha
+        else:
+            assert len(xyz.shape) == 3  # [B, N, 3]
+            assert len(feats.shape) == 2  # [B, F]
+            N = xyz.shape[1]
+            feats = feats.unsqueeze(1).repeat(1, N, 1)
+        geo_in = torch.cat([local_coords_encoded, feats], dim=-1)
+        if mask is not None:
+            alpha = self.forward_with_mask(geo_in, mask)
+        else:
+            alpha = self.geo_forward(geo_in)
+        return alpha
+
+    def forward_global(
+        self, x, volume, weight_mask, sdf_delta, voxel_size, volume_resolution, min_coords,
+        max_coords, active_voxels, geo_only=False
+    ):
+        xyz = x[..., :3]  # [b, n_pts, n_steps, 3]
+        voxel_coordinates = (xyz - min_coords) / voxel_size
+        neighbor_coords_grid_sample = voxel_coordinates / (volume_resolution-1)
+        neighbor_coords_grid_sample = neighbor_coords_grid_sample * 2 - 1
+        neighbor_coords_grid_sample = neighbor_coords_grid_sample[..., [2, 1, 0]]
+
+        b, n_pts, n_samples = xyz.shape[:3]
+        in_feats = F.grid_sample(
+            volume,
+            neighbor_coords_grid_sample.unsqueeze(0),
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=True
+        )
+        weight_mask = F.grid_sample(
+            weight_mask,
+            neighbor_coords_grid_sample.unsqueeze(0),
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=True
+        )
+        sdf_delta = F.grid_sample(
+            sdf_delta,
+            neighbor_coords_grid_sample.unsqueeze(0),  # [1, 8, n_pts, n_steps, 3]
+            mode="nearest",
+            padding_mode="zeros",
+            align_corners=True
+        )
+        # for scale_factor in [2, 4]:
+        #     tmp = self.sample_features(
+        #         xyz_grid_sample.unsqueeze(0),
+        #         volume,
+        #         1./scale_factor
+        #     )
+        #     in_feats += tmp * 1. / scale_factor
+        in_feats = in_feats[0].permute(1, 2, 3, 0)  # [1, n, s, f]
+        weight_mask = weight_mask[0].permute(1, 2, 3, 0)  # [1, n, s, 1]
+        sdf_delta = sdf_delta[0].permute(1, 2, 3, 0)
+        xyz = self.xyz_encoding(neighbor_coords_grid_sample)
+        if self.xyz_agnostic:
+            xyz = xyz * 0
+        total_pts = b * n_pts * n_samples
+        geo_in = torch.cat([xyz, in_feats], dim=-1)
+
+        if active_voxels is not None:
+            geo_in = geo_in.reshape(total_pts, -1)
+            out_feats = torch.zeros(
+                (total_pts, self.hidden_size), device=geo_in.device).float()
+            out_alpha = torch.zeros(
+                (total_pts, 1), device=geo_in.device
+            ).float() + 1
+            feats, alpha = self.geo_forward(geo_in[masks.reshape(-1)])
+            out_alpha[masks.reshape(-1)] = alpha
+            out_feats[masks.reshape(-1)] = feats
+            alpha = out_alpha.reshape(b, n_pts, n_samples, 1)
+            feats = out_feats.reshape(b, n_pts, n_samples, self.hidden_size)
+        else:
+            # feats, alpha = self.geo_forward(geo_in)
+            alpha = self.forward_with_mask(geo_in, weight_mask.bool())
+            alpha = alpha + sdf_delta
+        if geo_only:
+            return alpha
+        else:
+            # direction = x[..., 3:]
+            # direction = self.view_encoding(direction)
+            # y_ = torch.cat((feats, direction), dim=-1)
+            # for i in range(int(self.num_layers/2)):
+            #     lin = getattr(self, f"color_layer{i}")
+            #     y_ = self.relu(lin(y_))
+            # rgb = self.tanh(self.fc_rgb(y_))
+            rgb = torch.zeros_like(x[..., 3:])
+            return torch.cat((rgb, alpha), dim=-1), in_feats
+
+    def sample_features(self, coords, volume, scale_factor):
+        """
+        coords: [B, H, W, D, 3] in the range of [-1, 1]
+        volume: [B, C, H, W, D]
+        scale_factor
+        """
+        volume = F.interpolate(
+            volume, scale_factor=scale_factor, mode="trilinear",
+            align_corners=True
+        )
+        in_feats = F.grid_sample(
+            volume,
+            coords,
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=True
+        )
+        return in_feats
+
+    def compute_num_hits(self, num_hits, coordinates, min_coords, max_coords):
+        min_coords = min_coords.flatten()
+        max_coords = max_coords.flatten()
+        coordinates = coordinates.reshape(-1, 3)
+        mask = (coordinates[:, 0] >= min_coords[0]) * (coordinates[:, 0] < max_coords[0]) * \
+            (coordinates[:, 1] >= min_coords[1]) * (coordinates[:, 1] < max_coords[1]) * \
+            (coordinates[:, 2] >= min_coords[2]) * (coordinates[:, 2] < max_coords[2])
+        coordinates = coordinates[mask].long()
+        num_hits[coordinates[:, 0], coordinates[:, 1], coordinates[:, 2]] += 1
+        return num_hits
+
+    def forward_with_mask(self, input_feats, mask):
+        shapes = [l for l in input_feats.shape]
+        out_shapes = shapes[:-1] + [1]
+        mask = mask.reshape(-1)
+        input_feats = input_feats.reshape(-1, shapes[-1])
+        alpha = self.geo_forward(input_feats[mask].unsqueeze(0)).squeeze(0)
+        out = torch.zeros_like(input_feats[:, :1], dtype=alpha.dtype)
+        out[mask] = alpha
+        out = out.reshape(out_shapes)
+        return out
+
+    def forward_local(
+        self,
+        x,
+        volume,
+        weight_mask,
+        sdf_delta,
+        voxel_size,
+        volume_resolution,
+        min_coords,
+        max_coords,
+        active_voxels=None,
+        geo_only=False
+    ):
+        xyz = x[..., :3]  # [1, n_pts, n_steps, 3]
+        optim_num_hits = torch.zeros(volume_resolution.flatten().int().cpu().numpy().tolist(), device=x.device)
+        # [0, resolution-1]
+        voxel_coordinates = (xyz - min_coords) / voxel_size
+        if self.interpolate_decode:
+            min_coords = min_coords.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+            max_coords = max_coords.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+            volume_resolution = volume_resolution.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+            # [1, 8, n_pts, n_steps, 3]
+            neighbor_coordinates = self.get_neighbors(voxel_coordinates)
+            optim_num_hits = self.compute_num_hits(
+                optim_num_hits, neighbor_coordinates,
+                torch.zeros_like(volume_resolution), volume_resolution
+            )
+            local_coordinates = \
+                (voxel_coordinates.unsqueeze(1) - neighbor_coordinates)
+            neighbor_coords_grid_sample = neighbor_coordinates / (volume_resolution-1)
+            neighbor_coords_grid_sample = neighbor_coords_grid_sample * 2 - 1
+            neighbor_coords_grid_sample = neighbor_coords_grid_sample[..., [2, 1, 0]]
+        else:
+            neighbor_coordinates = torch.round(voxel_coordinates)
+            local_coordinates = voxel_coordinates - neighbor_coordinates
+            neighbor_coords_grid_sample = neighbor_coordinates / (volume_resolution-1)
+            neighbor_coords_grid_sample = neighbor_coords_grid_sample * 2 - 1
+            neighbor_coords_grid_sample = neighbor_coords_grid_sample[..., [2, 1, 0]]
+            neighbor_coords_grid_sample = neighbor_coords_grid_sample.unsqueeze(0)
+        assert torch.min(local_coordinates) >= -1
+        assert torch.max(local_coordinates) <= 1
+        # [1, feat_dims, 8, n_pts, n_samples]
+        in_feats = F.grid_sample(
+            volume,
+            neighbor_coords_grid_sample,
+            mode="nearest",
+            padding_mode="zeros",
+            align_corners=True
+        )
+        sdf_delta = F.grid_sample(
+            sdf_delta,
+            neighbor_coords_grid_sample,  # [1, 8, n_pts, n_steps, 3]
+            mode="nearest",
+            padding_mode="zeros",
+            align_corners=True
+        )
+        weight_mask = F.grid_sample(
+            weight_mask,
+            neighbor_coords_grid_sample,
+            mode="nearest",
+            padding_mode="zeros",
+            align_corners=True
+        )
+        if self.interpolate_decode:
+            in_feats = in_feats.permute(0, 2, 3, 4, 1)  # [B, 8, N, S, F]
+            sdf_delta = sdf_delta.permute(0, 2, 3, 4, 1)  # [B, 8, N, S, 1]
+            weight_mask = weight_mask.permute(0, 2, 3, 4, 1)  # [B, 8, N, S, 1]
+            weights_unmasked = torch.prod(
+                1 - torch.abs(local_coordinates),
+                dim=-1,
+                keepdim=True
+            )
+            weights = torch.where(
+                weight_mask.bool(),
+                weights_unmasked,
+                torch.zeros_like(weights_unmasked)
+            )
+            # FIXME: the sum of weights could be larger than 1 if the points
+            # lie exactly on the border. normalize to 1 as follows:
+            normalizer = torch.sum(weights, dim=1, keepdim=True)
+            invalid_mask = normalizer == 0
+            weights = weights / normalizer
+            weights = torch.where(
+                invalid_mask.repeat(1, 8, 1, 1, 1),
+                torch.zeros_like(weights),
+                weights
+                )
+            # weights should be either 0 for invalid points or 1 for valid points
+            assert not torch.any(torch.isnan(weights))
+            assert torch.all(
+                torch.logical_or(
+                    torch.abs(torch.sum(weights, dim=1) - 1) < 1e-5,
+                    torch.sum(weights, dim=1) == 0
+                )
+            )
+        else:
+            in_feats = in_feats.permute(0, 2, 3, 4, 1).squeeze(1)  # [B, N, S, F]
+
+        local_coords_encoded = self.xyz_encoding(local_coordinates)
+        geo_in = torch.cat([local_coords_encoded, in_feats], dim=-1)
+        # alpha: [1, 8, n_pts, n_samples, 1]
+        # alpha = self.forward_with_mask(geo_in, weights.bool())
+        feats, alpha = self.geo_forward(geo_in)
+        # NOTE: un-normalization for sdf prediction when using pointnet pretrained network.
+        # the output from the network is normalized to [-1, 1]
+        alpha = alpha * voxel_size
+
+        if self.interpolate_decode:
+            # alpha = torch.sum(alpha * weights, dim=1)
+            # alpha = torch.where(
+            #     invalid_mask.squeeze(1),
+            #     torch.zeros_like(alpha),
+            #     alpha
+            # )
+            normalizer = torch.sum(weights_unmasked, dim=1, keepdim=True)
+            weights_unmasked = weights_unmasked / normalizer
+            assert torch.all(torch.abs(weights_unmasked.sum(1) - 1) < 1e-5)
+            alpha = torch.sum(alpha * weights_unmasked, dim=1)
+            sdf_delta = torch.sum(sdf_delta * weights_unmasked, dim=1)
+            alpha = sdf_delta + alpha
+        else:
+            alpha = alpha
+        if geo_only:
+            return alpha, in_feats
+        else:
+            # direction = torch.zeros_like(local_coordinates)
+            # direction = self.view_encoding(direction)
+            # # [1, 8, n_pts, n_samples, feat_dims + view_encode_dims]
+            # y_ = torch.cat((feats, direction), dim=-1)
+            # for i in range(int(self.num_layers/2)):
+            #     lin = getattr(self, f"color_layer{i}")
+            #     y_ = self.relu(lin(y_))
+            # rgb = self.tanh(self.fc_rgb(y_))
+            # rgb = torch.sum(rgb * weights, dim=1)
+            rgb = torch.zeros_like(alpha).repeat(1, 1, 1, 3)
+            return torch.cat((rgb, sdf_delta, alpha), dim=-1), optim_num_hits
 
 
 class ReplicateNeRFModel(torch.nn.Module):

@@ -4,19 +4,10 @@ import torch
 import numpy as np
 import pickle
 import trimesh
-from scipy.ndimage.morphology import binary_dilation
-from sklearn.neighbors import NearestNeighbors
 from kornia.geometry.depth import depth_to_normals, depth_to_3d
 
-from src.models.idr.utils import general as utils
-from src.models.idr.utils import rend_util
-from src.models.fusion.volume import Volume
 from src.datasets import register
-from src.datasets.sampler import SampleManager
 import src.utils.geometry as geometry
-import src.utils.voxel_utils as voxel_utils
-import src.utils.pointnet_utils as pointnet_utils
-from src.utils.mesh_helper import as_mesh
 from src.utils.shapenet_helper import read_pose
 
 

@@ -1,6 +1,8 @@
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
+import commentjson as json
+import tinycudann as tcnn
 
 
 def query_ball_point(radius, nsample, xyz, new_xyz, return_dist=False):
@@ -226,7 +228,7 @@ class PointNetFeaturePropagation(nn.Module):
 
 
 class PointNetEncoder(nn.Module):
-    def __init__(self, feat_dims, in_channels):
+    def __init__(self, feat_dims, in_channels, **kwargs):
         super(PointNetEncoder, self).__init__()
         self.feat_dims = feat_dims
         self.conv1 = torch.nn.Conv1d(in_channels, 128, 1)
@@ -262,6 +264,35 @@ class PointNetEncoder(nn.Module):
             return x  # [B, F]
         else:
             return x  # [B, F, N]
+
+
+class tcnnPointNetEncoder(nn.Module):
+    def __init__(self, feat_dims, in_channels, **kwargs):
+        super(tcnnPointNetEncoder, self).__init__()
+        with open(kwargs['tcnn_config']) as config_file:
+            config = json.load(config_file)
+        self.model = tcnn.NetworkWithInputEncoding(
+            n_input_dims=in_channels,
+            n_output_dims=feat_dims,
+            encoding_config=config["encoding"],
+            network_config=config["network"]
+        )
+        self.feat_dims = feat_dims
+        self.in_channels = in_channels
+
+    def forward(self, x, global_feat):
+        x = x.transpose(2, 1)
+        B, N, D = x.size()
+        x = self.model(x.reshape(-1, self.in_channels))
+        x = x.reshape(B, N, self.feat_dims)
+        x = x.permute(0, 2, 1)  # [B, F, N]
+        if global_feat:
+            x = torch.mean(x, 2, keepdim=True)
+            x = x.view(-1, self.feat_dims)
+            return x  # [B, F]
+        else:
+            return x  # [B, F, N]
+
 
 
 class PointNet(nn.Module):

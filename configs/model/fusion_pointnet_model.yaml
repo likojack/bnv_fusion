@@ -6,6 +6,9 @@ voxel_size: 0.01
 train_split: 10000
 train_ray_splits: 1000
 
+tiny_cuda: True
+tcnn_config: ./src/models/tcnn_config.json
+
 training_global: False
 global_coords: False
 interpolate_decode: True  # use interpolation when decoding points.
