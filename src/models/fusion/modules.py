@@ -807,8 +807,8 @@ class ReplicateNeRFModel(torch.nn.Module):
         out_shapes = shapes[:-1] + [1]
         mask = mask.reshape(-1)
         input_feats = input_feats.reshape(-1, shapes[-1])
-        out = torch.zeros_like(input_feats[:, :1])
         _, alpha = self.geo_forward(input_feats[mask])
+        out = torch.zeros_like(input_feats[:, :1], dtype=alpha.dtype)
         out[mask] = alpha
         out = out.reshape(out_shapes)
         return out

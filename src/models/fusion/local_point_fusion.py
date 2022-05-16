@@ -415,10 +415,7 @@ class LitFusionPointNet(pl.LightningModule):
                 size=(1,)
             ).item()
             input_ = data['input_pts'][:, :ind, :]
-            import time
-            t0 = time.time()
             point_feats = self(input_, normalize=False)
-            print(time.time() - t0)
             loss_out = self.compute_loss(data, point_feats)
         else:
             n_xyz = data['n_xyz'][0].cpu().numpy().astype(np.int32).tolist()
