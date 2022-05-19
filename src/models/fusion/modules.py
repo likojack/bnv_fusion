@@ -247,9 +247,9 @@ class tcnnNeRFModel(torch.nn.Module):
         ], dim=1).int()
 
     def geo_forward(self, xyz):
-        B, N, F = xyz.shape
-        out = self.model(xyz.reshape(-1, F))
-        out = out.reshape(B, N, 1)
+        shapes = list(xyz.shape)
+        out = self.model(xyz.reshape(-1, shapes[-1]))
+        out = out.reshape(shapes[:-1] + [1])
         return out
 
     def forward(
@@ -339,11 +339,9 @@ class tcnnNeRFModel(torch.nn.Module):
             out_alpha = torch.zeros(
                 (total_pts, 1), device=geo_in.device
             ).float() + 1
-            feats, alpha = self.geo_forward(geo_in[masks.reshape(-1)])
+            alpha = self.geo_forward(geo_in[masks.reshape(-1)])
             out_alpha[masks.reshape(-1)] = alpha
-            out_feats[masks.reshape(-1)] = feats
             alpha = out_alpha.reshape(b, n_pts, n_samples, 1)
-            feats = out_feats.reshape(b, n_pts, n_samples, self.hidden_size)
         else:
             # feats, alpha = self.geo_forward(geo_in)
             alpha = self.forward_with_mask(geo_in, weight_mask.bool())
@@ -351,13 +349,6 @@ class tcnnNeRFModel(torch.nn.Module):
         if geo_only:
             return alpha
         else:
-            # direction = x[..., 3:]
-            # direction = self.view_encoding(direction)
-            # y_ = torch.cat((feats, direction), dim=-1)
-            # for i in range(int(self.num_layers/2)):
-            #     lin = getattr(self, f"color_layer{i}")
-            #     y_ = self.relu(lin(y_))
-            # rgb = self.tanh(self.fc_rgb(y_))
             rgb = torch.zeros_like(x[..., 3:])
             return torch.cat((rgb, alpha), dim=-1), in_feats
 
@@ -504,7 +495,7 @@ class tcnnNeRFModel(torch.nn.Module):
         geo_in = torch.cat([local_coords_encoded, in_feats], dim=-1)
         # alpha: [1, 8, n_pts, n_samples, 1]
         # alpha = self.forward_with_mask(geo_in, weights.bool())
-        feats, alpha = self.geo_forward(geo_in)
+        alpha = self.geo_forward(geo_in)
         # NOTE: un-normalization for sdf prediction when using pointnet pretrained network.
         # the output from the network is normalized to [-1, 1]
         alpha = alpha * voxel_size
@@ -668,7 +659,7 @@ class ReplicateNeRFModel(torch.nn.Module):
             lin = getattr(self, f"geo_layer{i}")
             xyz = self.relu(lin(xyz))
         alpha = self.fc_alpha(xyz)
-        return xyz, alpha
+        return alpha
 
     def forward(
         self,
@@ -742,33 +733,11 @@ class ReplicateNeRFModel(torch.nn.Module):
             xyz = xyz * 0
         total_pts = b * n_pts * n_samples
         geo_in = torch.cat([xyz, in_feats], dim=-1)
-
-        if active_voxels is not None:
-            geo_in = geo_in.reshape(total_pts, -1)
-            out_feats = torch.zeros(
-                (total_pts, self.hidden_size), device=geo_in.device).float()
-            out_alpha = torch.zeros(
-                (total_pts, 1), device=geo_in.device
-            ).float() + 1
-            feats, alpha = self.geo_forward(geo_in[masks.reshape(-1)])
-            out_alpha[masks.reshape(-1)] = alpha
-            out_feats[masks.reshape(-1)] = feats
-            alpha = out_alpha.reshape(b, n_pts, n_samples, 1)
-            feats = out_feats.reshape(b, n_pts, n_samples, self.hidden_size)
-        else:
-            # feats, alpha = self.geo_forward(geo_in)
-            alpha = self.forward_with_mask(geo_in, weight_mask.bool())
-            alpha = alpha + sdf_delta
+        alpha = self.forward_with_mask(geo_in, weight_mask.bool())
+        alpha = alpha + sdf_delta
         if geo_only:
             return alpha
         else:
-            # direction = x[..., 3:]
-            # direction = self.view_encoding(direction)
-            # y_ = torch.cat((feats, direction), dim=-1)
-            # for i in range(int(self.num_layers/2)):
-            #     lin = getattr(self, f"color_layer{i}")
-            #     y_ = self.relu(lin(y_))
-            # rgb = self.tanh(self.fc_rgb(y_))
             rgb = torch.zeros_like(x[..., 3:])
             return torch.cat((rgb, alpha), dim=-1), in_feats
 
@@ -807,7 +776,7 @@ class ReplicateNeRFModel(torch.nn.Module):
         out_shapes = shapes[:-1] + [1]
         mask = mask.reshape(-1)
         input_feats = input_feats.reshape(-1, shapes[-1])
-        _, alpha = self.geo_forward(input_feats[mask])
+        alpha = self.geo_forward(input_feats[mask])
         out = torch.zeros_like(input_feats[:, :1], dtype=alpha.dtype)
         out[mask] = alpha
         out = out.reshape(out_shapes)
@@ -915,7 +884,7 @@ class ReplicateNeRFModel(torch.nn.Module):
         geo_in = torch.cat([local_coords_encoded, in_feats], dim=-1)
         # alpha: [1, 8, n_pts, n_samples, 1]
         # alpha = self.forward_with_mask(geo_in, weights.bool())
-        feats, alpha = self.geo_forward(geo_in)
+        alpha = self.geo_forward(geo_in)
         # NOTE: un-normalization for sdf prediction when using pointnet pretrained network.
         # the output from the network is normalized to [-1, 1]
         alpha = alpha * voxel_size
@@ -987,7 +956,7 @@ class LocalNeRFModel(ReplicateNeRFModel):
             if mask is not None:
                 alpha = self.forward_with_mask(geo_in, mask)
             else:
-                feats, alpha = self.geo_forward(geo_in)
+                alpha = self.geo_forward(geo_in)
             return alpha
         else:
             assert len(xyz.shape) == 3  # [B, N, 3]
@@ -998,7 +967,7 @@ class LocalNeRFModel(ReplicateNeRFModel):
         if mask is not None:
             alpha = self.forward_with_mask(geo_in, mask)
         else:
-            feats, alpha = self.geo_forward(geo_in)
+            alpha = self.geo_forward(geo_in)
         return alpha
 
 

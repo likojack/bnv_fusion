@@ -296,7 +296,6 @@ class SparseVolume:
             mesh.export(path)
         return active_pts, mesh
 
-
     def decode_pts(
         self,
         coords,
@@ -342,7 +341,7 @@ class SparseVolume:
 
         local_coords_encoded = nerf.xyz_encoding(local_coords)
         nerf_in = torch.cat([local_coords_encoded, feats], dim=-1)
-        _, alpha = nerf.geo_forward(nerf_in)
+        alpha = nerf.geo_forward(nerf_in)
         alpha = alpha * self.voxel_size
         normalizer = torch.sum(weights_unmasked, dim=1, keepdim=True)
         weights_unmasked = weights_unmasked / normalizer

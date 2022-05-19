@@ -493,7 +493,6 @@ def render_with_rays(
     coords = (pts - volume.min_coords) / volume.voxel_size
     coords = get_neighbors(coords)
     volume.count_optim(coords)
-
     pred_sdf = volume.decode_pts(
         pts, nerf, sdf_delta=sdf_delta)
     pred_sdf = pred_sdf[..., 0]
@@ -550,7 +549,6 @@ def compute_sdf_loss(
     return depth_bce
 
 def calculate_loss(
-    frame,
     volume,
     rays,
     nerf,

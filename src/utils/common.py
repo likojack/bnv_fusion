@@ -3,8 +3,21 @@ import imageio
 import numpy as np
 import os
 import os.path as osp
+import torch
 import skimage
 from skimage import transform
+
+
+def to_cuda(in_dict):
+    for k in in_dict:
+        if isinstance(in_dict[k], torch.Tensor):
+            in_dict[k] = in_dict[k].to("cuda")
+
+
+def to_cpu(in_dict):
+    for k in in_dict:
+        if isinstance(in_dict[k], torch.Tensor):
+            in_dict[k] = in_dict[k].cpu()
 
 
 def override_weights(model, pretrained_weights, keys):

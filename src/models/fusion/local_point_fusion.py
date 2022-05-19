@@ -98,7 +98,8 @@ class LitFusionPointNet(pl.LightningModule):
             * (in_xyz[0, :, 0] > bound_min[0] + voxel_size) \
             * (in_xyz[0, :, 1] > bound_min[1] + voxel_size) \
             * (in_xyz[0, :, 2] > bound_min[2] + voxel_size)
-
+        if torch.sum(bound_mask) == 0:
+            return None, None, None, None, None
         in_xyz = in_xyz[:, bound_mask, :]
         in_normal = in_normal[:, bound_mask, :]
 

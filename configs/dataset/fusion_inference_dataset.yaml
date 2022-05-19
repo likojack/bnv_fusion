@@ -17,7 +17,7 @@ train_batch_size: 1
 eval_batch_size: 1
 max_eval_imgs: 1
 shuffle: True
-num_workers: 0
+num_workers: 8
 first_k: 2
 max_neighbor_images: 5
 
