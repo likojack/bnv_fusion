@@ -12,7 +12,7 @@
   </p>
 </p>
 
-## BNV-Fusion
+## BNV-Fusion ([Video](https://www.youtube.com/watch?v=ptx5vtQ9SvM) | [Paper](https://arxiv.org/pdf/2204.01139.pdf))
 
 This repo implements the CVPR 2022 paper [Bi-level Neural Volume Fusion (BNV-Fusion)](https://arxiv.org/abs/2204.01139). BNV-Fusion leverages recent advances in neural implicit representations and neural rendering for dense 3D reconstruction. The keys to BNV-Fusion are 1) a sparse voxel grid of local shape codes to model surface geometry; 2) a well-designed bi-level fusion mechanism to integrate raw depth observations to the implicit grid efficiently and effectively. As a result, BNV-Fusin can run at a relatively **high frame rate** (2-5 frames per second on a desktop GPU) and reconstruct the 3D environment with **high accuracy**, where fine details missed by recent neural implicit based methods or traditional TSDF-Fusion are captured by BNV-Fusion.
 
