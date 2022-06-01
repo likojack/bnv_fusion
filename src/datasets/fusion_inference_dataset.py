@@ -1,3 +1,4 @@
+import json
 import cv2
 import os
 import torch
@@ -209,7 +210,7 @@ class FusionInferenceDataset(torch.utils.data.Dataset):
             "depth_path": depth_path,
             "img_path": image_path,
             "scene_id": scene,
-            "frame_id": frame_id,
+            "frame_id": int(frame_id),
             "T_wc": T_wc,
             "intr_mat": intr_mat,
             "rgbd": rgbd,
@@ -309,7 +310,8 @@ class FusionInferenceDatasetScanNet(torch.utils.data.Dataset):
         intr_mat[:2, :3] = intr_mat[:2, :3] * self.downsample_scale
         clean_depth, noise_depth, frame_mask = load_depth(
             depth_path, self.downsample_scale, max_depth=self.max_depth, add_noise=False)
-        rgb = np.zeros((3, clean_depth.shape[0], clean_depth.shape[1]))
+        rgb = cv2.imread(image_path, -1)[:, :, ::-1] / 255. * 2 - 1
+        rgb = cv2.resize(rgb, (clean_depth.shape[1], clean_depth.shape[0])).transpose(2, 0, 1)
         normal = depth_to_normals(
             torch.from_numpy(clean_depth).unsqueeze(0).unsqueeze(0),
             torch.from_numpy(intr_mat).unsqueeze(0)
@@ -351,17 +353,18 @@ class FusionInferenceDatasetScanNet(torch.utils.data.Dataset):
 
 @register("fusion_inference_dataset_arkit")
 class FusionInferenceDatasetARKit(torch.utils.data.Dataset):
+    """ Dataset to process sequences captured by iphone/ipad via the "3D scanner" app
+    """
+
     def __init__(self, cfg, stage):
         self.cfg = cfg
-        self.data_root_dir = os.path.join(
-            cfg.dataset.data_dir,
-            cfg.dataset.subdomain,
-        )
+        self.data_root_dir = cfg.dataset.data_dir
         self.dense_volume = cfg.trainer.dense_volume
         scan_id = cfg.dataset.scan_id
         self.scan_id = scan_id
-        gt_mesh_path = os.path.join(self.data_root_dir, scan_id, f"{scan_id}_3dod_mesh.ply")
-        gt_mesh = trimesh.load(gt_mesh_path)
+        self.seq_dir = os.path.join(self.data_root_dir, scan_id)
+        rough_mesh_path = os.path.join(self.seq_dir, "export.obj")
+        gt_mesh = trimesh.load(rough_mesh_path)
         max_pts = np.max(gt_mesh.vertices, axis=0)
         min_pts = np.min(gt_mesh.vertices, axis=0)
         center = (min_pts + max_pts) / 2
@@ -369,8 +372,6 @@ class FusionInferenceDatasetARKit(torch.utils.data.Dataset):
         self.axis_align_mat = np.eye(4)
         self.axis_align_mat[:3, 3] = -center
         self.dimensions = dimensions
-        self.skip = cfg.dataset.skip_images
-        self.shift = cfg.dataset.sample_shift
         self.downsample_scale = cfg.dataset.downsample_scale
         self.stage = stage
         self.feat_dim = cfg.model.feature_vector_size
@@ -379,17 +380,96 @@ class FusionInferenceDatasetARKit(torch.utils.data.Dataset):
         self.num_pixels = cfg.dataset.num_pixels
         self.max_depth = cfg.model.ray_tracer.ray_max_dist
         self.voxel_size = cfg.model.voxel_size
-        num_images = len(os.listdir(os.path.join(
-            self.data_root_dir, self.scan_id, "image")))
-        img_ids = np.arange(self.shift, num_images, self.skip)
-        self.num_images = len(img_ids)
-        self.scene_images = {
-            scan_id: [str(i) for i in img_ids]
-        }
+        self.confidence_level = cfg.dataset.confidence_level
+        self.mask_paths = []
+        self.depth_paths = []
+        self.img_paths = []
+        self.cam_paths = []
+        img_names = [f.split("_")[1].split(".")[0] for f in os.listdir(self.seq_dir) if f.startswith("depth_")]
+        img_names = sorted(img_names, key=lambda a: int(a))
+        self.num_images = len(img_names)
         self.sampling_idx = torch.arange(0, self.num_pixels)
+        for img_name in img_names:
+            self.depth_paths.append(os.path.join(self.seq_dir, f"depth_{img_name}.png"))
+            self.mask_paths.append(os.path.join(self.seq_dir, f"conf_{img_name}.png"))
+            self.cam_paths.append(os.path.join(self.seq_dir, f"frame_{img_name}.json"))
+            img_path = os.path.join(self.seq_dir, f"frame_{img_name}.jpg")
+            if not os.path.exists(img_path):
+                self.img_paths.append(img_path)
+            else:
+                self.img_paths.append(None)
+        self.intr_scale = 1 / 7.5  # the scale factor between the intr_mat for highres RGB and lowres depth
+        
         if stage == "val":
             self.val_seq = self.scan_id
-        self.init_volumes(dimensions)
+
+    def load_confidence(self, mask_path):
+        confidence = cv2.imread(mask_path, -1)
+        return confidence >= self.confidence_level
+
+    def __len__(self):
+        return self.num_images
+        
+    def __getitem__(self, idx):
+        depth_path = self.depth_paths[idx]
+        img_path = self.img_paths[idx]
+        if img_path is None:
+            img_path = "rgb_not_exist"
+
+        mask_path = self.mask_paths[idx]
+        cam_path = self.cam_paths[idx]
+        with open(cam_path, "r") as f:
+            cam = json.load(f)
+        intr_mat = np.asarray(cam['intrinsics']).reshape(3, 3)
+        intr_mat[:2, :3] *= self.intr_scale * self.downsample_scale
+        T_wc = np.asarray(cam['cameraPoseARFrame']).reshape(4, 4)
+        T_align = np.eye(4)
+        T_align[1, 1] = -1
+        T_align[2, 2] = -1
+        T_wc = self.axis_align_mat @ T_wc @ T_align
+        clean_depth, noise_depth, frame_mask = load_depth(
+            depth_path, self.downsample_scale, max_depth=self.max_depth, add_noise=False)
+
+        frame_mask *= self.load_confidence(mask_path)
+
+        rgb = np.zeros((3, clean_depth.shape[0], clean_depth.shape[1]))
+        normal = depth_to_normals(
+            torch.from_numpy(clean_depth).unsqueeze(0).unsqueeze(0),
+            torch.from_numpy(intr_mat).unsqueeze(0)
+        )[0].permute(1, 2, 0).numpy()
+        gt_xyz_map = depth_to_3d(
+            torch.from_numpy(clean_depth).unsqueeze(0).unsqueeze(0),
+            torch.from_numpy(intr_mat).unsqueeze(0)
+        )[0].permute(1, 2, 0).numpy()
+        img_h, img_w = clean_depth.shape
+        gt_xyz_map_w = (T_wc @ geometry.get_homogeneous(gt_xyz_map.reshape(-1, 3)).T)[:3, :].T
+        gt_xyz_map_w = gt_xyz_map_w.reshape(img_h, img_w, 3)
+
+        # NOTE: VERY IMPORTANT TO * -1 for normal due to a bug in data preparation in
+        # data_prepare_depth_shapenet.py!
+        normal_w = (T_wc[:3, :3] @ normal.reshape(-1, 3).T).T
+        rgbd = np.concatenate([rgb, noise_depth[None, ...]], axis=0)
+        pts_c = geometry.depth2xyz(clean_depth, intr_mat).reshape(-1, 3)
+        pts_w_frame = (T_wc @ geometry.get_homogeneous(pts_c).T)[:3, :].T
+        input_pts = np.concatenate(
+            [pts_w_frame, normal_w],
+            axis=-1
+        )
+        input_pts = input_pts[frame_mask.reshape(-1)]
+        frame = {
+            "depth_path": depth_path,
+            "img_path": img_path,
+            "scene_id": self.scan_id,
+            "frame_id": idx,
+            "T_wc": T_wc,
+            "intr_mat": intr_mat,
+            "rgbd": rgbd,
+            "mask": frame_mask,
+            "gt_pts": pts_w_frame,
+            "gt_depth": clean_depth,
+            "input_pts": input_pts,
+        }
+        return frame, {}
 
 
 class IterableInferenceDataset(torch.utils.data.Dataset):
@@ -407,7 +487,6 @@ class IterableInferenceDataset(torch.utils.data.Dataset):
         return self.n_iters
 
     def __getitem__(self, idx):
-        print(self.last_frame, len(self.img_list))
         if self.last_frame != -1:
             img_id = torch.randint(self.last_frame, len(self.img_list), size=(1,))
         else:
