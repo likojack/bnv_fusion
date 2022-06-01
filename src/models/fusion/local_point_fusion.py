@@ -411,7 +411,7 @@ class LitFusionPointNet(pl.LightningModule):
         batch_loss = {}
         if not self.training_global:
             ind = torch.randint(
-                low=int(self.cfg.dataset.n_local_samples/2),
+                low=int(self.cfg.model.min_pts_in_grid/2),  #int(self.cfg.dataset.n_local_samples/2),
                 high=self.cfg.dataset.n_local_samples,
                 size=(1,)
             ).item()
