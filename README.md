@@ -50,16 +50,16 @@ unzip lounge.zip && rm lounge.zip
 
 
 ## Running
-The following script is an example of running the system on all sequences in the 3D scene dataset.
+<!-- The following script is an example of running the system on all sequences in the 3D scene dataset.
 ```
 export PYTHONPATH=$PYTHONPATH:$PWD
 conda activate bnv_fusion
 python src/script/run_inference_on_scene3d.py
-```
+``` -->
 
-To process just a sequence, use the following command:
+To process a sequence, use the following command:
 ```
-python src/run_e2e.py model=fusion_pointnet_model dataset=fusion_inference_dataset trainer.checkpoint=$PWD/pretrained/pointnet.ckpt model.tcnn_config=$PWD/src/models/tcnn_config.json model.mode="demo"
+python src/run_e2e.py model=fusion_pointnet_model dataset=fusion_inference_dataset dataset.scan_id="scene3d/lounge" trainer.checkpoint=$PWD/pretrained/pointnet.ckpt model.tcnn_config=$PWD/src/models/tcnn_config.json model.mode="demo"
 ```
 
 # Training the embedding (optional)
