@@ -1,8 +1,10 @@
+from weakref import KeyedRef
 import hydra
 import numpy as np
 import os
 from omegaconf import DictConfig
 import torch
+import time
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from pytorch_lightning import seed_everything
@@ -15,7 +17,7 @@ import src.utils.voxel_utils as voxel_utils
 from src.models.fusion.local_point_fusion import LitFusionPointNet
 from src.models.sparse_volume import SparseVolume
 from src.utils.render_utils import calculate_loss
-from src.utils.common import to_cuda
+from src.utils.common import to_cuda, Timer
 import third_parties.fusion as fusion
 
 
@@ -237,7 +239,7 @@ def main(config: DictConfig):
         config,
         pointnet_model,
         working_dir=plots_dir)
-
+    timer = Timer(["local", "global"])
     for idx, data in enumerate(tqdm(val_loader)):
         # LOCAL FUSION:
         # integrate information from the new frame to the feature volume
@@ -245,7 +247,9 @@ def main(config: DictConfig):
         for k in frame.keys():
             if isinstance(frame[k], torch.Tensor):
                 frame[k] = frame[k].cuda().float()
+        timer.start("local")
         neural_map.integrate(frame)
+        timer.log("local")
         if torch.isnan(frame['T_wc']).any():
             continue
         meta_frame = {
@@ -265,7 +269,9 @@ def main(config: DictConfig):
             if (idx) % config.model.optim_interval == 0:
                 last_frame = max(0, len(neural_map.frames) - config.model.optim_interval)
                 n_iters = min(len(neural_map.frames), config.model.optim_interval) * neural_map.skip_images
+                timer.start("global")
                 neural_map.optimize(n_iters=n_iters, last_frame=last_frame)
+                timer.log("global")
                 mesh = neural_map.extract_mesh()
                 mesh = o3d_helper.post_process_mesh(mesh)
                 mesh_out_path = os.path.join(neural_map.working_dir, f"{idx}.ply")
@@ -275,7 +281,12 @@ def main(config: DictConfig):
     mesh.export(os.path.join(neural_map.working_dir, "before_optim.ply"))
     global_steps = int(len(neural_map.frames) * neural_map.skip_images)
     global_steps = global_steps * 2 if config.model.mode != "demo" else global_steps
+    timer.start("global")
     neural_map.optimize(n_iters=global_steps, last_frame=-1)
+    timer.log("global")
+    for n in ["local", "global"]:
+        print(f"speed on {n} fusion: {global_steps / timer.times[n]} fps")
+    
     mesh = neural_map.extract_mesh()
     mesh = o3d_helper.post_process_mesh(mesh)
     mesh_out_path = os.path.join(neural_map.working_dir, "final.ply")

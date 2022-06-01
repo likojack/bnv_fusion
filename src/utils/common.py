@@ -4,8 +4,21 @@ import numpy as np
 import os
 import os.path as osp
 import torch
+import time
 import skimage
 from skimage import transform
+
+
+class Timer:
+    def __init__(self, names):
+        self.times = {n: 0 for n in names}
+        self.t0 = {n: 0 for n in names}
+
+    def start(self, name):
+        self.t0[name] = time.time()
+    
+    def log(self, name):
+        self.times[name] += time.time() - self.t0[name]
 
 
 def to_cuda(in_dict):
