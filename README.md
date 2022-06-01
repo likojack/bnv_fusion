@@ -59,7 +59,7 @@ python src/script/run_inference_on_scene3d.py
 
 To process just a sequence, use the following command:
 ```
-python src/run_e2e.py model=fusion_pointnet_model dataset=fusion_inference_dataset trainer.checkpoint=$PWD/pretrained/pointnet.ckpt
+python src/run_e2e.py model=fusion_pointnet_model dataset=fusion_inference_dataset trainer.checkpoint=$PWD/pretrained/pointnet.ckpt model.tcnn_config=$PWD/src/models/tcnn_config.json model.mode="demo"
 ```
 
 # Training the embedding (optional)
