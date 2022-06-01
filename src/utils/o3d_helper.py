@@ -1,7 +1,10 @@
 import numpy as np
 import open3d as o3d
+import open3d.core as o3c
 import trimesh
+import torch
 import os
+
 
 from src.utils.geometry import get_homogeneous
 
@@ -214,6 +217,29 @@ def mesh2o3d(vertices, faces, normals=None, colors=None):
     return trimesh2o3d(mesh)
 
 
+def post_process_mesh(mesh, vertex_threshold=0.005, surface_threshold=0.1):
+    """ merge close vertices and remove small connected components
+
+    Args:
+        mesh (trimesh.Trimesh): input trimesh
+
+    Returns:
+        _type_: _description_
+    """
+    mesh_o3d = trimesh2o3d(mesh)
+    mesh_o3d.merge_close_vertices(vertex_threshold).remove_degenerate_triangles().remove_duplicated_triangles().remove_duplicated_vertices()
+    mesh_o3d = mesh_o3d.filter_smooth_simple(number_of_iterations=1)
+    # component_ids, component_nums, component_surfaces = mesh_o3d.cluster_connected_triangles()
+    # remove_componenets = np.asarray(component_nums)[np.asarray(component_surfaces) < surface_threshold]
+    # remove_mask = [c in remove_componenets for c in component_ids]
+    # mesh_o3d.remove_triangles_by_mask(remove_mask)
+    # mesh_o3d.remove_unreferenced_vertices()
+    mesh = trimesh.Trimesh(
+        vertices=np.asarray(mesh_o3d.vertices),
+        faces=np.asarray(mesh_o3d.triangles),
+    )
+    return mesh
+
 class TSDFFusion:
     def __init__(self, voxel_size=0.01):
         self.volume = o3d.pipelines.integration.ScalableTSDFVolume(
@@ -263,3 +289,8 @@ class TSDFFusion:
                 os.mkdir(dir_)
             mesh.export(path)
         return mesh
+
+
+if __name__ == "__main__":
+    mesh = trimesh.load("/home/kejie/repository/bnv_fusion/logs/run_e2e/scene0000_00/3999.ply")
+    mesh = post_process_mesh(mesh)

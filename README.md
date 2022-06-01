@@ -59,9 +59,14 @@ python src/script/run_inference_on_scene3d.py
 
 To process just a sequence, use the following command:
 ```
-python src/run_e2e.py model=fusion_pointnet_model dataset=fusion_inference_dataset trainer.checkpoint=$PWD/pretrained/pointnet.ckpt
+python src/run_e2e.py model=fusion_pointnet_model dataset=fusion_inference_dataset trainer.checkpoint=$PWD/pretrained/pointnet.ckpt model.tcnn_config=$PWD/src/models/tcnn_config.json model.mode="demo"
 ```
 
+# Training the embedding (optional)
+Instead of using the pretrained model provided, you can also train the local embedding yourself by running the following command
+```
+python src/train.py model=fusion_pointnet_modeldataset=fusion_pointnet_dataset model.voxel_size=0.01 model.min_pts_in_grid=8 model.train_ray_splits=1000 model.tcnn_config=$PWD/src/models/tcnn_config.json
+```
 ## Citation
 If you find our code or paper useful, please cite
 ```bibtex

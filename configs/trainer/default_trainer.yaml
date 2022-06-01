@@ -19,3 +19,4 @@ checkpoint: null
 weight_only: False
 
 dense_volume: False
+post_process: True

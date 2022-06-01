@@ -20,6 +20,7 @@ class SparseVolume:
         min_coords, max_coords, n_xyz = voxel_utils.get_world_range(
             dimensions, voxel_size)
         self.device = device
+        self.dimensions = dimensions
         self.voxel_size = voxel_size
         self.o3c_device = o3c.Device(device)
         self.min_coords = torch.from_numpy(min_coords).float().to(device)
@@ -129,6 +130,28 @@ class SparseVolume:
         self.num_hits = None
         self.active_coordinates = None
 
+    def count_optim(self, keys):
+        """[summary]
+
+        Args:
+            keys ([torch.Tensor]): shape: [1, 8, B, N, 3]
+
+        Returns:
+            [type]: [description]
+        """
+        shapes = [s for s in keys.shape]
+        n_pts = np.asarray(shapes[:-1]).prod()
+        assert shapes[-1] == 3
+        o3c_keys = o3c.Tensor.from_dlpack(
+            torch.utils.dlpack.to_dlpack(keys.reshape(-1, 3).long())
+        )
+        buf_indices, masks = self.tensor_indexer.find(o3c_keys)
+        buf_indices = buf_indices[masks]
+        indices = self.tensor_indexer.value_tensor()[buf_indices]
+        indices = torch.utils.dlpack.from_dlpack(
+            indices.to_dlpack())[:, 0]
+        self.weights[indices] += 1
+
 
     def _query_tensor(self, keys):
         """[summary]
@@ -158,7 +181,7 @@ class SparseVolume:
             
         out_feats[masks_torch] = self.features[indices]
         out_weights[masks_torch] = self.weights[indices]
-        out_num_hits[masks_torch] = self.weights[indices]
+        out_num_hits[masks_torch] = self.num_hits[indices]
         
         out_feats = out_feats.reshape(shapes[:-1] + [self.n_feats])
         out_weights = out_weights.reshape(shapes[:-1] + [1])
@@ -273,7 +296,6 @@ class SparseVolume:
             mesh.export(path)
         return active_pts, mesh
 
-
     def decode_pts(
         self,
         coords,
@@ -319,7 +341,7 @@ class SparseVolume:
 
         local_coords_encoded = nerf.xyz_encoding(local_coords)
         nerf_in = torch.cat([local_coords_encoded, feats], dim=-1)
-        _, alpha = nerf.geo_forward(nerf_in)
+        alpha = nerf.geo_forward(nerf_in)
         alpha = alpha * self.voxel_size
         normalizer = torch.sum(weights_unmasked, dim=1, keepdim=True)
         weights_unmasked = weights_unmasked / normalizer
@@ -355,6 +377,8 @@ class SparseVolume:
             "25%": self.per_25 if self.per_25 else None,
             "50%": self.per_50,
             "75%": self.per_75,
+            "dimensions": self.dimensions,
+            "voxel_size": self.voxel_size,
             "mean": self.avg_n_pts,
             "min": self.min_pts,
             "active_keys": active_keys,

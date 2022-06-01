@@ -27,7 +27,7 @@ device_type: "cuda"
 hydra:
     # output paths for hydra logs
     run:
-        dir: logs/${hydra.job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+        dir: logs/${hydra.job.name}/
     sweep:
         dir: logs/multiruns/${now:%Y-%m-%d_%H-%M-%S}
         subdir: ${hydra.job.num}

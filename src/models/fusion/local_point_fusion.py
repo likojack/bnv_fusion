@@ -3,8 +3,7 @@ from typing import Optional, List
 import os
 import open3d.core as o3c
 import trimesh
-import mcubes
-from skimage.measure import marching_cubes_lewiner
+from skimage.measure import marching_cubes
 from torch_scatter import scatter_mean
 
 import torch
@@ -14,7 +13,7 @@ import pytorch_lightning as pl
 
 from src.models.model_utils import set_optimizer_and_lr
 from src.models.models import register
-from src.models.fusion.modules import LocalNeRFModel
+from src.models.fusion.modules import LocalNeRFModel, tcnnNeRFModel
 import src.utils.voxel_utils as voxel_utils
 import src.utils.pointnet_utils as pointnet_utils
 
@@ -28,10 +27,15 @@ class LitFusionPointNet(pl.LightningModule):
         self.dense_volume = cfg.trainer.dense_volume
         self.feat_dims = cfg.model.feature_vector_size
         self.interpolate_decode = cfg.model.nerf.interpolate_decode
-        self.pointnet_backbone = pointnet_utils.PointNetEncoder(
-            self.feat_dims, **cfg.model.point_net)
-        self.nerf = LocalNeRFModel(
-            self.feat_dims, **cfg.model.nerf)
+        if cfg.model.tiny_cuda:
+            self.pointnet_backbone = pointnet_utils.tcnnPointNetEncoder(
+                self.feat_dims, tcnn_config=cfg.model.tcnn_config, **cfg.model.point_net)
+            self.nerf = tcnnNeRFModel(self.feat_dims, tcnn_config=cfg.model.tcnn_config, **cfg.model.nerf)
+        else:
+            self.pointnet_backbone = pointnet_utils.PointNetEncoder(
+                self.feat_dims, **cfg.model.point_net)
+            self.nerf = LocalNeRFModel(
+                self.feat_dims, **cfg.model.nerf)
         self.voxel_size = cfg.model.voxel_size
         self.n_xyz = np.ceil((np.asarray(cfg.model.bound_max) - np.asarray(cfg.model.bound_min)) / self.voxel_size).astype(int).tolist()
         self.bound_min = torch.tensor(cfg.model.bound_min, device=self.device).float()
@@ -40,10 +44,7 @@ class LitFusionPointNet(pl.LightningModule):
         self.loss_weight = cfg.model.loss
         self.min_pts_in_grid = cfg.model.min_pts_in_grid
         self.automatic_optimization = False
-        if cfg.dataset.out_root is not None:
-            self.plots_dir = os.path.join(cfg.dataset.out_root, cfg.dataset.scan_id)
-        else:
-            self.plots_dir = os.path.join(os.getcwd(), "plots")
+        self.plots_dir = os.path.join(os.getcwd(), "plots")
         if not os.path.exists(self.plots_dir):
             os.makedirs(self.plots_dir)
 
@@ -97,7 +98,8 @@ class LitFusionPointNet(pl.LightningModule):
             * (in_xyz[0, :, 0] > bound_min[0] + voxel_size) \
             * (in_xyz[0, :, 1] > bound_min[1] + voxel_size) \
             * (in_xyz[0, :, 2] > bound_min[2] + voxel_size)
-
+        if torch.sum(bound_mask) == 0:
+            return None, None, None, None, None
         in_xyz = in_xyz[:, bound_mask, :]
         in_normal = in_normal[:, bound_mask, :]
 
@@ -126,19 +128,19 @@ class LitFusionPointNet(pl.LightningModule):
             feat_grids = torch.zeros(
                 (1, self.feat_dims, res_x, res_y, res_z),
                 device=self.device,
-                dtype=torch.float
+                dtype=point_feats.dtype
             )
             mask = torch.zeros(
                 (1, 1, res_x, res_y, res_z),
                 device=self.device,
-                dtype=torch.float
+                dtype=point_feats.dtype
             )
-            mask[0, 0, unique_grid_ids[:, 0], unique_grid_ids[:, 1], unique_grid_ids[:, 2]] = pcounts.float()
+            mask[0, 0, unique_grid_ids[:, 0], unique_grid_ids[:, 1], unique_grid_ids[:, 2]] = pcounts.type(point_feats.type())
             # pcounts[pcounts < self.min_pts_in_grid] = 0
             feat_grids[0, :, unique_grid_ids[:, 0], unique_grid_ids[:, 1], unique_grid_ids[:, 2]] = point_feats_mean
             return feat_grids, mask, unique_flat_ids, flat_ids
         else:
-            n_avg_pts = torch.mean(pcounts.float())
+            n_avg_pts = torch.mean(pcounts.type(point_feats.type()))
             valid_mask = pcounts >= self.min_pts_in_grid
             point_feats_mean = point_feats_mean[:, :, valid_mask]
             pcounts = pcounts[valid_mask]
@@ -220,7 +222,7 @@ class LitFusionPointNet(pl.LightningModule):
                     sdf = sdf.detach().cpu().numpy()
                     if np.min(sdf) > 0 or np.max(sdf) < 0:
                         continue
-                    verts, faces, _, _ = marching_cubes_lewiner(sdf, level=0.)
+                    verts, faces, _, _ = marching_cubes(sdf, level=0., spacing=(1, 1, 1))
                     if len(verts) == 0:
                         continue
                     verts = verts * np.asarray(spacing)[None, :]
@@ -409,7 +411,7 @@ class LitFusionPointNet(pl.LightningModule):
         batch_loss = {}
         if not self.training_global:
             ind = torch.randint(
-                low=int(self.cfg.dataset.n_local_samples/2),
+                low=int(self.cfg.model.min_pts_in_grid/2),  #int(self.cfg.dataset.n_local_samples/2),
                 high=self.cfg.dataset.n_local_samples,
                 size=(1,)
             ).item()
@@ -655,6 +657,7 @@ class LitFusionPointNet(pl.LightningModule):
         fine_feats,
         fine_weights
     ):
+        fine_weights = torch.clip(fine_weights / 32, max=1)
         model_feats, model_weights, model_num_hits = volume_object.query(fine_coords)
         if len(fine_coords) > 0:
             new_fine_feats, new_fine_weights = self._update(
@@ -909,9 +912,8 @@ class LitFusionPointNet(pl.LightningModule):
         if np.min(occupancy_grid) > 0.:
             return None
         visible = np.ones_like(occupancy_grid)
-        verts, faces = mcubes.marching_cubes(
-            -occupancy_grid, 0
-        )
+        verts, faces, _, _ = marching_cubes(
+            -occupancy_grid, level=0, spacing=(1, 1, 1))
         verts = (verts - steps / 2) * spacing[None, :]
         if len(verts) == 0:
             return None

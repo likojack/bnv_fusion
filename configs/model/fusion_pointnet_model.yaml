@@ -6,6 +6,9 @@ voxel_size: 0.01
 train_split: 10000
 train_ray_splits: 1000
 
+tiny_cuda: True
+tcnn_config: ./src/models/tcnn_config.json
+
 training_global: False
 global_coords: False
 interpolate_decode: True  # use interpolation when decoding points.
@@ -42,6 +45,8 @@ ray_tracer:
 
 # for end-to-end
 sdf_delta_weight: 0.1
+optim_interval: 100
+mode: eval
 freeze_pretrained_weights: True
 pretrained_model: /home/kejie/repository/fast_sdf/logs/train/2021-10-21/22-37-03/lightning_logs/version_0/checkpoints/last.ckpt
 depth_scale: 1000
