@@ -1,27 +1,21 @@
-import cv2
 import hydra
 import numpy as np
 import os
 from omegaconf import DictConfig
-import open3d as o3d
-import open3d.core as o3c
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import pytorch_lightning as pl
 from pytorch_lightning import seed_everything
 
 from src.datasets import datasets
 from src.datasets.fusion_inference_dataset import IterableInferenceDataset
-import src.utils.geometry as geometry
 import src.utils.o3d_helper as o3d_helper
 import src.utils.hydra_utils as hydra_utils
 import src.utils.voxel_utils as voxel_utils
 from src.models.fusion.local_point_fusion import LitFusionPointNet
 from src.models.sparse_volume import SparseVolume
 from src.utils.render_utils import calculate_loss
-from src.utils.common import load_depth, to_cuda, to_cpu
+from src.utils.common import to_cuda
 import third_parties.fusion as fusion
 
 
@@ -174,15 +168,16 @@ class NeuralMap:
         tsdf_volume, _ = self.tsdf_vol.get_volume()
         tsdf_volume = tsdf_volume * (self.tsdf_voxel_size * 5)
         tsdf_volume = torch.from_numpy(tsdf_volume).to(self.pointnet.device).float().unsqueeze(0).unsqueeze(0)
-        resized_tsdf_volume = F.interpolate(
-            tsdf_volume,
-            size=(
-                self.n_xyz[0],
-                self.n_xyz[1],
-                self.n_xyz[2]
-            ),
-            mode="trilinear",
-            align_corners=True)
+        resized_tsdf_volume = tsdf_volume
+        # resized_tsdf_volume = F.interpolate(
+        #     tsdf_volume,
+        #     size=(
+        #         self.n_xyz[0],
+        #         self.n_xyz[1],
+        #         self.n_xyz[2]
+        #     ),
+        #     mode="trilinear",
+        #     align_corners=True)
         resized_tsdf_volume = torch.clip(
             resized_tsdf_volume, min=-self.truncated_dist, max=self.truncated_dist)
         resized_tsdf_volume *= self.sdf_delta_weight
@@ -276,6 +271,9 @@ def main(config: DictConfig):
                 mesh_out_path = os.path.join(neural_map.working_dir, f"{idx}.ply")
                 mesh.export(mesh_out_path)
     # start_timer()
+    neural_map.volume.to_tensor()
+    mesh = neural_map.extract_mesh()
+    mesh.export(os.path.join(neural_map.working_dir, "before_optim.ply"))
     global_steps = int(len(neural_map.frames) * neural_map.skip_images)
     global_steps = global_steps * 2 if config.model.mode != "demo" else global_steps
     neural_map.optimize(n_iters=global_steps, last_frame=-1)
