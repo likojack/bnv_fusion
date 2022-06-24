@@ -6,7 +6,6 @@ import trimesh
 import numpy as np
 from kornia.geometry.depth import depth_to_normals, depth_to_3d
 
-from src.models.sparse_volume import SparseVolume, VolumeList
 from src.datasets import register
 import src.utils.geometry as geometry
 import src.utils.voxel_utils as voxel_utils
@@ -14,217 +13,7 @@ from src.utils.common import load_depth, load_rgb
 import src.utils.scannet_helper as scannet_helper
 
 
-@register("fusion_inference_dataset")
-class FusionInferenceDataset(torch.utils.data.Dataset):
-    """Dataset for a class of objects, where each datapoint is a SceneInstanceDataset."""
-
-    def __init__(self, cfg, stage):
-        super().__init__()
-        self.cfg = cfg
-        self.data_root_dir = os.path.join(
-            cfg.dataset.data_dir,
-            cfg.dataset.subdomain,
-        )
-        self.dense_volume = cfg.trainer.dense_volume
-        scan_id = cfg.dataset.scan_id
-        self.scan_id = scan_id
-        dimension_path = os.path.join(
-            self.data_root_dir, self.scan_id, "pose", "dimensions.txt"
-        )
-        with open(dimension_path, "r") as f:
-            line = f.read().splitlines()[0].split(" ")
-            dimensions = np.asarray([float(l) for l in line])
-        self.dimensions = dimensions
-        self.skip = cfg.dataset.skip_images
-        self.shift = cfg.dataset.sample_shift
-        self.downsample_scale = cfg.dataset.downsample_scale
-        self.stage = stage
-        self.feat_dim = cfg.model.feature_vector_size
-        self.img_res = cfg.dataset.img_res
-        self.total_pixels = self.img_res[0] * self.img_res[1]
-        self.num_pixels = cfg.dataset.num_pixels
-        self.max_depth = cfg.model.ray_tracer.ray_max_dist
-        self.voxel_size = cfg.model.voxel_size
-        num_images = len(os.listdir(os.path.join(
-            self.data_root_dir, self.scan_id, "image")))
-        img_ids = np.arange(self.shift, num_images, self.skip)
-        self.num_images = len(img_ids)
-        self.scene_images = {
-            scan_id: [str(i) for i in img_ids]
-        }
-        self.sampling_idx = torch.arange(0, self.num_pixels)
-        if stage == "val":
-            self.val_seq = self.scan_id
-        self.init_volumes(dimensions)
-
-    def __len__(self):
-        return len(self.scene_images[self.scan_id])
-
-    def read_pose(self, path):
-        with open(path, "r") as f:
-            line = f.read().splitlines()[0].split(" ")
-            pose = np.asarray([float(t) for t in line])
-            nrow = int(np.sqrt(len(pose)))
-        return pose.reshape(nrow, nrow).astype(np.float32)
-
-    def change_sampling_idx(self, sampling_size):
-        if sampling_size == -1:
-            self.sampling_idx = None
-        else:
-            self.sampling_idx = torch.randperm(self.total_pixels)[:sampling_size]
-
-    def init_volumes(self, dimensions):
-        self.volume_list = {}
-        min_coords, max_coords, n_xyz = voxel_utils.get_world_range(
-            dimensions, self.voxel_size)
-        if self.dense_volume:
-            self.volume_list[self.scan_id] = Volume(
-                self.feat_dim, n_xyz, min_coords, max_coords, device_type=self.cfg.device_type
-            )
-        else:
-            self.volume_list[self.scan_id] = VolumeList(
-                self.feat_dim,
-                self.voxel_size,
-                dimensions,
-                self.cfg.model.min_pts_in_grid
-            )
-
-    def reset_volumes(self):
-        self.volume_list[self.scan_id].reset()
-
-    def get_neighbor_xyz(self, xyz_map, mask, uv, kernel_size=15):
-        uv = uv.numpy().astype(np.int32)
-        mask = mask.astype(np.float32)
-        n_pts = len(uv)
-        half_length = np.floor(kernel_size / 2).astype(np.int32)
-        img_h, img_w = xyz_map.shape[:2]
-        out = np.zeros((n_pts, int(kernel_size ** 2), 3)) - 1000
-        out_mask = np.zeros((n_pts, int(kernel_size ** 2))) - 1
-        for i in range(n_pts):
-            x, y = uv[i]
-            y_start = y - half_length
-            y_end = y + half_length
-            y_range = np.arange(y_start, y_end+1)
-            y_range = np.clip(y_range, a_min=0, a_max=img_h-1)
-            x_start = x - half_length
-            x_end = x + half_length
-            x_range = np.arange(x_start, x_end+1)
-            x_range = np.clip(x_range, a_min=0, a_max=img_w-1)
-            indices = np.stack(np.meshgrid(y_range, x_range), axis=-1).reshape(-1, 2)
-            out[i] = xyz_map[indices[:, 0], indices[:, 1], :3]
-            out_mask[i] = mask[indices[:, 0], indices[:, 1]]
-
-        assert (out_mask != -1).all()
-        assert (out != -1000).all()
-        out_mask = out_mask.astype(np.bool)
-        return out, out_mask
-
-    def get_uv_block(self, img_h, img_w, kernel_size):
-        half_length = int(kernel_size/2)
-        x_min = half_length
-        x_max = img_w - half_length
-        y_min = half_length
-        y_max = img_h - half_length
-
-        x = torch.randint(x_min, x_max, (1,)).item()
-        y = torch.randint(y_min, y_max, (1,)).item()
-        x_start = x - half_length
-        x_end = x + half_length
-        y_start = y - half_length
-        y_end = y + half_length
-
-        x_range = np.arange(x - half_length, x + half_length)
-        assert np.min(x_range) >= 0
-        assert np.max(x_range) < img_w
-        y_range = np.arange(y - half_length, y + half_length)
-        assert np.min(y_range) >= 0
-        assert np.max(y_range) < img_h
-        indices = np.stack(np.meshgrid(y_range, x_range), axis=-1).reshape(-1, 2)
-        # switch x and y
-        indices = indices[:, [1,0]]
-        return indices
-
-    def __getitem__(self, idx):
-        scene = self.scan_id
-        frame_id = self.scene_images[scene][idx]
-        # prepare data for frame
-        dimension_path = os.path.join(
-            self.data_root_dir, scene, "pose", "dimensions.txt"
-        )
-        with open(dimension_path, "r") as f:
-            line = f.read().splitlines()[0].split(" ")
-            dimensions = np.asarray([float(l) for l in line])
-        min_coords, max_coords, n_xyz = voxel_utils.get_world_range(
-            dimensions, self.voxel_size)
-
-        image_path = os.path.join(
-            self.data_root_dir, scene, "image", f"{frame_id}.jpg")
-        depth_path = os.path.join(
-            self.data_root_dir, scene, "depth", f"{frame_id}.png")
-        mask_path = os.path.join(
-            self.data_root_dir, scene, "mask", f"{frame_id}.png")
-        T_wc_path = os.path.join(
-            self.data_root_dir, scene, "pose", f"T_wc_{frame_id}.txt")
-        intr_mat_path = os.path.join(
-            self.data_root_dir, scene, "pose", f"intr_mat_{frame_id}.txt")
-        T_wc = self.read_pose(T_wc_path)
-        intr_mat = self.read_pose(intr_mat_path)[:3, :3]
-        intr_mat[:2, :3] = intr_mat[:2, :3] * self.downsample_scale
-        rgb = load_rgb(image_path, downsample_scale=self.downsample_scale)
-        clean_depth, noise_depth, frame_mask = load_depth(
-            depth_path, self.downsample_scale, max_depth=self.max_depth, add_noise=False)
-        normal = depth_to_normals(
-            torch.from_numpy(clean_depth).unsqueeze(0).unsqueeze(0),
-            torch.from_numpy(intr_mat).unsqueeze(0)
-        )[0].permute(1, 2, 0).numpy()
-        gt_xyz_map = depth_to_3d(
-            torch.from_numpy(clean_depth).unsqueeze(0).unsqueeze(0),
-            torch.from_numpy(intr_mat).unsqueeze(0)
-        )[0].permute(1, 2, 0).numpy()
-        img_h, img_w = clean_depth.shape
-        gt_xyz_map_w = (T_wc @ geometry.get_homogeneous(gt_xyz_map.reshape(-1, 3)).T)[:3, :].T
-        gt_xyz_map_w = gt_xyz_map_w.reshape(img_h, img_w, 3)
-        # # get observed voxels
-        # sdf, weight = voxel_utils.depth_to_tsdf(
-        #     clean_depth,
-        #     T_wc,
-        #     intr_mat,
-        #     min_coords,
-        #     max_coords,
-        #     np.asarray(n_xyz),
-        #     self.voxel_size
-        # )
-
-        # NOTE: VERY IMPORTANT TO * -1 for normal due to a bug in data preparation in
-        # data_prepare_depth_shapenet.py!
-        normal_w = (T_wc[:3, :3] @ normal.reshape(-1, 3).T).T
-        rgbd = np.concatenate([rgb, noise_depth[None, ...]], axis=0)
-        pts_c = geometry.depth2xyz(clean_depth, intr_mat).reshape(-1, 3)
-        pts_w_frame = (T_wc @ geometry.get_homogeneous(pts_c).T)[:3, :].T
-        input_pts = np.concatenate(
-            [pts_w_frame, normal_w],
-            axis=-1
-        )
-        input_pts = input_pts[frame_mask.reshape(-1)]
-        frame = {
-            "depth_path": depth_path,
-            "img_path": image_path,
-            "scene_id": scene,
-            "frame_id": int(frame_id),
-            "T_wc": T_wc,
-            "intr_mat": intr_mat,
-            "rgbd": rgbd,
-            "mask": frame_mask,
-            "gt_pts": pts_w_frame,
-            "gt_depth": clean_depth,
-            "input_pts": input_pts,
-        }
-
-        return frame, {}
-
-
-@register("fusion_inference_dataset_scannet")
-class FusionInferenceDatasetScanNet(torch.utils.data.Dataset):
+class FusionInferenceAbstractDataset(torch.utils.data.Dataset):
     def __init__(self, cfg, stage):
         super().__init__()
         self.scan_id = cfg.dataset.scan_id
@@ -238,67 +27,15 @@ class FusionInferenceDatasetScanNet(torch.utils.data.Dataset):
         self.num_pixels = cfg.dataset.num_pixels
         self.max_depth = cfg.model.ray_tracer.ray_max_dist
         self.voxel_size = cfg.model.voxel_size
-        
-        img_dir = os.path.join(cfg.dataset.data_dir, self.scan_id, "frames", "color")
-        
-        num_images = len(os.listdir(img_dir))
-        img_ids = np.arange(0, num_images, self.skip)
-        self.img_h = self.img_res[0]
-        self.img_w = self.img_res[1]
-        self.num_images = len(img_ids)
         self.depth_scale = cfg.dataset.depth_scale
-        axis_align_mat = scannet_helper.read_meta_file(
-            os.path.join(
-                cfg.dataset.data_dir, self.scan_id, f"{self.scan_id}.txt")
-        )
-        mesh_path = os.path.join(cfg.dataset.data_dir, self.scan_id, f"{self.scan_id}_vh_clean_2.ply")
-        mesh = trimesh.load(mesh_path)
-        mesh.vertices = (axis_align_mat @ geometry.get_homogeneous(mesh.vertices).T)[:3, :].T
-        max_pts = np.max(mesh.vertices, axis=0)
-        min_pts = np.min(mesh.vertices, axis=0)
-        center = (min_pts + max_pts) / 2
-        self.dimensions = np.asarray(max_pts - min_pts)
-        recenter_mat = np.eye(4)
-        recenter_mat[:3, 3] = -center
-        self.axis_align_mat = recenter_mat @ axis_align_mat
         self.image_paths = []
         self.depth_paths = []
         self.T_wc_paths = []
         self.intr_mat_paths = []
-        for img_id in img_ids:
-            self.image_paths.append(
-                os.path.join(
-                    cfg.dataset.data_dir, self.scan_id, "frames", "color", f"{img_id}.jpg"
-                )
-            )
-            self.depth_paths.append(
-                os.path.join(
-                    cfg.dataset.data_dir, self.scan_id, "frames", "depth", f"{img_id}.png"
-                )
-            )
-            self.T_wc_paths.append(
-                os.path.join(
-                    cfg.dataset.data_dir, self.scan_id, "frames", "pose", f"{img_id}.txt"
-                )
-            )
-            self.intr_mat_paths.append(
-                os.path.join(
-                    cfg.dataset.data_dir, self.scan_id, "frames", "intrinsic", "intrinsic_depth.txt"
-                )
-            )
         self.sampling_idx = torch.arange(0, self.num_pixels)
 
     def __len__(self):
         return len(self.image_paths)
-
-    def read_extr_pose(self, path):
-        T_cw = scannet_helper.read_extrinsic(path)
-        T_wc = np.linalg.inv(T_cw)
-        T_wc = self.axis_align_mat @ T_wc
-        return T_wc
-
-    def read_intr_pose(self, path):
-        return scannet_helper.read_intrinsic(path)[:3, :3]
 
     def __getitem__(self, idx):
         image_path = self.image_paths[idx]
@@ -307,34 +44,31 @@ class FusionInferenceDatasetScanNet(torch.utils.data.Dataset):
         intr_mat_path = self.intr_mat_paths[idx]
         T_wc = self.read_extr_pose(T_wc_path)
         intr_mat = self.read_intr_pose(intr_mat_path)[:3, :3]
-        intr_mat[:2, :3] = intr_mat[:2, :3] * self.downsample_scale
-        clean_depth, noise_depth, frame_mask = load_depth(
-            depth_path, self.downsample_scale, max_depth=self.max_depth, add_noise=False)
-        rgb = cv2.imread(image_path, -1)[:, :, ::-1] / 255. * 2 - 1
-        rgb = cv2.resize(rgb, (clean_depth.shape[1], clean_depth.shape[0])).transpose(2, 0, 1)
+        rgb = self.read_rgb(image_path)
+        depth, mask = self.read_depth(depth_path)
         normal = depth_to_normals(
-            torch.from_numpy(clean_depth).unsqueeze(0).unsqueeze(0),
+            torch.from_numpy(depth).unsqueeze(0).unsqueeze(0),
             torch.from_numpy(intr_mat).unsqueeze(0)
         )[0].permute(1, 2, 0).numpy()
         gt_xyz_map = depth_to_3d(
-            torch.from_numpy(clean_depth).unsqueeze(0).unsqueeze(0),
+            torch.from_numpy(depth).unsqueeze(0).unsqueeze(0),
             torch.from_numpy(intr_mat).unsqueeze(0)
         )[0].permute(1, 2, 0).numpy()
-        img_h, img_w = clean_depth.shape
+        img_h, img_w = depth.shape
         gt_xyz_map_w = (T_wc @ geometry.get_homogeneous(gt_xyz_map.reshape(-1, 3)).T)[:3, :].T
         gt_xyz_map_w = gt_xyz_map_w.reshape(img_h, img_w, 3)
 
         # NOTE: VERY IMPORTANT TO * -1 for normal due to a bug in data preparation in
         # data_prepare_depth_shapenet.py!
         normal_w = (T_wc[:3, :3] @ normal.reshape(-1, 3).T).T
-        rgbd = np.concatenate([rgb, noise_depth[None, ...]], axis=0)
-        pts_c = geometry.depth2xyz(clean_depth, intr_mat).reshape(-1, 3)
+        rgbd = np.concatenate([rgb, depth[None, ...]], axis=0)
+        pts_c = geometry.depth2xyz(depth, intr_mat).reshape(-1, 3)
         pts_w_frame = (T_wc @ geometry.get_homogeneous(pts_c).T)[:3, :].T
         input_pts = np.concatenate(
             [pts_w_frame, normal_w],
             axis=-1
         )
-        input_pts = input_pts[frame_mask.reshape(-1)]
+        input_pts = input_pts[mask.reshape(-1)]
         frame = {
             "depth_path": depth_path,
             "img_path": image_path,
@@ -343,12 +77,160 @@ class FusionInferenceDatasetScanNet(torch.utils.data.Dataset):
             "T_wc": T_wc,
             "intr_mat": intr_mat,
             "rgbd": rgbd,
-            "mask": frame_mask,
+            "mask": mask,
             "gt_pts": pts_w_frame,
-            "gt_depth": clean_depth,
+            "gt_depth": depth,
             "input_pts": input_pts,
         }
         return frame, {}
+
+    def read_rgb(self, path):
+        raise NotImplementedError("subclass should implement this")
+    
+    def read_depth(self, path):
+        raise NotImplementedError("subclass should implement this")
+    
+    def read_extr_pose(self, path):
+        raise NotImplementedError("subclass should implement this")
+    
+    def read_intr_pose(self, path):
+        raise NotImplementedError("subclass should implement this")
+
+
+@register("fusion_inference_dataset")
+class FusionInferenceDataset(FusionInferenceAbstractDataset):
+    def __init__(self, cfg, stage):
+        super().__init__(cfg, stage)
+        root_dir = os.path.join(cfg.dataset.data_dir, self.scan_id)
+        dimension_path = os.path.join(root_dir, "pose", "dimensions.txt")
+        with open(dimension_path, "r") as f:
+            line = f.read().splitlines()[0].split(" ")
+            self.dimensions = np.asarray([float(l) for l in line])
+        num_images = len(os.listdir(os.path.join(root_dir, "image")))
+        for i in range(num_images):
+            self.image_paths.append(os.path.join(root_dir, "image", f"{i}.jpg"))
+            self.depth_paths.append(os.path.join(root_dir, "depth", f"{i}.png"))
+            self.T_wc_paths.append(os.path.join(root_dir, "pose",
+                                                f"T_wc_{i}.txt"))
+            self.intr_mat_paths.append(os.path.join(root_dir, "pose",
+                                                    f"intr_mat_{i}.txt"))
+
+    def read_pose(self, path):
+        with open(path, "r") as f:
+            line = f.read().splitlines()[0].split(" ")
+            pose = np.asarray([float(t) for t in line])
+            nrow = int(np.sqrt(len(pose)))
+        return pose.reshape(nrow, nrow).astype(np.float32)
+
+    def read_extr_pose(self, path):
+        return self.read_pose(path)
+
+    def read_intr_pose(self, path):
+        intr_mat = self.read_pose(path)
+        intr_mat[:2, :3] = intr_mat[:2, :3] * self.downsample_scale
+        return intr_mat
+
+    def read_depth(self, path):
+        depth, _, mask = load_depth(path, self.downsample_scale,
+                                    max_depth=self.max_depth, add_noise=False)
+        return depth, mask
+
+    def read_rgb(self, path):
+        return load_rgb(path, downsample_scale=self.downsample_scale)
+
+
+@register("fusion_inference_dataset_scannet")
+class FusionInferenceDatasetScanNet(FusionInferenceAbstractDataset):
+    def __init__(self, cfg, stage):
+        super().__init__(cfg, stage)
+        img_dir = os.path.join(cfg.dataset.data_dir, self.scan_id, "frames", "color")
+        num_images = len(os.listdir(img_dir))
+        img_ids = np.arange(0, num_images, self.skip)
+        self.num_images = num_images
+        axis_align_mat = scannet_helper.read_meta_file(
+            os.path.join(
+                cfg.dataset.data_dir, self.scan_id, f"{self.scan_id}.txt")
+        )
+        mesh_path = os.path.join(cfg.dataset.data_dir,
+                                 self.scan_id,
+                                 f"{self.scan_id}_vh_clean_2.ply")
+        mesh = trimesh.load(mesh_path)
+        mesh.vertices = (axis_align_mat @\
+            geometry.get_homogeneous(mesh.vertices).T)[:3, :].T
+        
+        max_pts = np.max(mesh.vertices, axis=0)
+        min_pts = np.min(mesh.vertices, axis=0)
+        center = (min_pts + max_pts) / 2
+        self.dimensions = np.asarray(max_pts - min_pts)
+        recenter_mat = np.eye(4)
+        recenter_mat[:3, 3] = -center
+        self.axis_align_mat = recenter_mat @ axis_align_mat
+        frame_dir = os.path.join(cfg.dataset.data_dir, self.scan_id, "frames")
+        for img_id in img_ids:
+            self.image_paths.append(
+                os.path.join(frame_dir, "color", f"{img_id}.jpg"))
+            self.depth_paths.append(
+                os.path.join(frame_dir, "depth", f"{img_id}.png"))
+            self.T_wc_paths.append(
+                os.path.join(frame_dir, "pose", f"{img_id}.txt"))
+            self.intr_mat_paths.append(
+                os.path.join(frame_dir, "intrinsic", "intrinsic_depth.txt"))
+
+    def read_extr_pose(self, path):
+        T_cw = scannet_helper.read_extrinsic(path)
+        T_wc = np.linalg.inv(T_cw)
+        T_wc = self.axis_align_mat @ T_wc
+        return T_wc
+
+    def read_intr_pose(self, path):
+        intr_mat = scannet_helper.read_intrinsic(path)[:3, :3]
+        intr_mat[:2, :3] *= self.downsample_scale
+        return intr_mat
+
+    def read_rgb(self, path):
+        rgb = cv2.imread(path, -1)[:, :, ::-1] / 255. * 2 - 1
+        rgb = cv2.resize(rgb, (self.img_res[1], self.img_res[0])).transpose(2, 0, 1)
+        return rgb
+
+    def read_depth(self, path):
+        depth, _, mask = load_depth(path, self.downsample_scale, max_depth=self.max_depth, add_noise=False)
+        return depth, mask
+
+@register("fusion_inference_dataset_synthetic")
+class FusionInferenceDatasetSynthetic(FusionInferenceAbstractDataset):    
+    def __init__(self, cfg, stage):
+        super().__init__(cfg, stage)
+        root_dir = os.path.join(cfg.dataset.data_dir, self.scan_id) 
+        num_images = len(os.listdir(os.path.join(root_dir, "image")))
+        img_ids = np.arange(0, num_images, self.skip)
+        cams = np.load(os.path.join(root_dir, "cameras_sphere.npz"))
+        dimensions = float(2 * cams['scale_factor_0'])
+        self.dimensions = np.asarray([dimensions, dimensions, dimensions])
+        for i in img_ids:
+            self.image_paths.append(os.path.join(root_dir, "image",
+                                    "{:03d}.png".format(i)))
+            self.depth_paths.append(os.path.join(root_dir, "depth",
+                                    "{:03d}.png".format(i)))
+            P = cams[f'world_mat_{i}'] @ cams[f'scale_mat_{i}']
+            P = P[:3, :4]
+            intrinsics, pose = geometry.load_K_Rt_from_P(None, P)
+            self.T_wc_paths.append(pose)
+            self.intr_mat_paths.append(intrinsics)
+
+    def read_extr_pose(self, path):
+        return path
+
+    def read_intr_pose(self, path):
+        return path
+
+    def read_rgb(self, path):
+        rgb = cv2.imread(path, -1)[:, :, ::-1] / 255. * 2 - 1
+        rgb = cv2.resize(rgb, (self.img_res[1], self.img_res[0])).transpose(2, 0, 1)
+        return rgb
+
+    def read_depth(self, path):
+        depth, _, mask = load_depth(path, self.downsample_scale, max_depth=self.max_depth, add_noise=False)
+        return depth, mask
 
 
 @register("fusion_inference_dataset_arkit")
@@ -360,8 +242,7 @@ class FusionInferenceDatasetARKit(torch.utils.data.Dataset):
         self.cfg = cfg
         self.data_root_dir = cfg.dataset.data_dir
         self.dense_volume = cfg.trainer.dense_volume
-        scan_id = cfg.dataset.scan_id
-        self.scan_id = scan_id
+
         self.seq_dir = os.path.join(self.data_root_dir, scan_id)
         rough_mesh_path = os.path.join(self.seq_dir, "export.obj")
         gt_mesh = trimesh.load(rough_mesh_path)
@@ -406,9 +287,6 @@ class FusionInferenceDatasetARKit(torch.utils.data.Dataset):
     def load_confidence(self, mask_path):
         confidence = cv2.imread(mask_path, -1)
         return confidence >= self.confidence_level
-
-    def __len__(self):
-        return self.num_images
         
     def __getitem__(self, idx):
         depth_path = self.depth_paths[idx]
