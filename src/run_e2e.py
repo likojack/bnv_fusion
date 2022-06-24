@@ -288,7 +288,7 @@ def main(config: DictConfig):
         print(f"speed on {n} fusion: {global_steps / timer.times[n]} fps")
     
     mesh = neural_map.extract_mesh()
-    mesh = o3d_helper.post_process_mesh(mesh)
+    mesh = o3d_helper.post_process_mesh(mesh, vertex_threshold=neural_map.voxel_size / 4)
     mesh_out_path = os.path.join(neural_map.working_dir, "final.ply")
     mesh.export(mesh_out_path)
     neural_map.save()
