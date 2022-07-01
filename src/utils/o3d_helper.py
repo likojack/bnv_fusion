@@ -261,7 +261,7 @@ class TSDFFusion:
         color = o3d.geometry.Image(color.astype(np.uint8))
         depth = o3d.geometry.Image((depth * 1000).astype(np.uint16))
         rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-            color, depth, depth_trunc=5.0, convert_rgb_to_intensity=False)
+            color, depth, depth_trunc=10000000.0, convert_rgb_to_intensity=False)
         intrinsic = o3d.camera.PinholeCameraIntrinsic()
         intrinsic.set_intrinsics(
             width=img_w,
