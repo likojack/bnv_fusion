@@ -12,6 +12,7 @@ from src.datasets import register
 from src.datasets.sampler import SampleManager
 import src.utils.geometry as geometry
 import src.utils.voxel_utils as voxel_utils
+from src.models.sparse_volume import VolumeList
 import src.utils.scannet_helper as scannet_helper
 
 
@@ -107,7 +108,12 @@ class FusionDataset(FusionBaseDataset):
                 dimensions, self.voxel_size
             )
             volume_resolution = volume_resolution.astype(np.int32)
-            self.volume_list[scene] = Volume(self.feat_dim, volume_resolution)
+            self.volume_list[scene] = VolumeList(
+                self.feat_dim,
+                self.voxel_size,
+                dimensions,
+                self.cfg.model.min_pts_in_grid
+            )
         assert len(self.volume_list.keys()) < 10, "memory will explore if handling too many scenes"
 
     def reset_volumes(self):
