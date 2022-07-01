@@ -2,6 +2,7 @@ import numpy as np
 import open3d as o3d
 import open3d.core as o3c
 from skimage.measure import marching_cubes
+from torch_scatter import scatter_mean
 import torch
 import torch.nn.functional as F
 import torch.utils.dlpack
@@ -10,6 +11,474 @@ import trimesh
 from src.models.fusion.utils import get_neighbors
 import src.utils.voxel_utils as voxel_utils
 import src.utils.o3d_helper as o3d_helper
+
+
+class SparseTSDFVolume:
+    """
+    Based on hash map implementation in Open3D.
+    """
+
+    def __init__(self, voxel_size, dimensions, truncated_dist, capacity=100000, device="cuda:0") -> None:
+        min_coords, max_coords, n_xyz = voxel_utils.get_world_range(
+            dimensions, voxel_size)
+        self.device = device
+        self.dimensions = dimensions
+        self.voxel_size = voxel_size
+        self.o3c_device = o3c.Device(device)
+        self.min_coords = torch.from_numpy(min_coords).float().to(device)
+        self.max_coords = torch.from_numpy(max_coords).float().to(device)
+        self.n_xyz = torch.from_numpy(np.asarray(n_xyz)).long().to(device)
+        self.n_feats = 1
+        self.reset(capacity)
+
+        self.avg_n_pts = 0
+        self.n_pts_list = []
+        self.n_frames = 0
+        self.min_pts = 1000
+        self.max_pts = 0
+        self.truncated_dist = truncated_dist
+
+    def get_neighbors(self, points):
+        """
+        args: voxel_coordinates: [b, n_steps, n_samples, 3]
+        """
+        return torch.stack([
+            torch.stack(
+                [
+                    torch.floor(points[..., 0]),
+                    torch.floor(points[..., 1]),
+                    torch.floor(points[..., 2])
+                ],
+                dim=-1
+            ),
+            torch.stack(
+                [
+                    torch.ceil(points[..., 0]),
+                    torch.floor(points[..., 1]),
+                    torch.floor(points[..., 2])
+                ],
+                dim=-1
+            ),
+            torch.stack(
+                [
+                    torch.floor(points[..., 0]),
+                    torch.ceil(points[..., 1]),
+                    torch.floor(points[..., 2])
+                ],
+                dim=-1
+            ),
+            torch.stack(
+                [
+                    torch.floor(points[..., 0]),
+                    torch.floor(points[..., 1]),
+                    torch.ceil(points[..., 2])
+                ],
+                dim=-1
+            ),
+            torch.stack(
+                [
+                    torch.ceil(points[..., 0]),
+                    torch.ceil(points[..., 1]),
+                    torch.floor(points[..., 2])
+                ],
+                dim=-1
+            ),
+            torch.stack(
+                [
+                    torch.ceil(points[..., 0]),
+                    torch.floor(points[..., 1]),
+                    torch.ceil(points[..., 2])
+                ],
+                dim=-1
+            ),
+            torch.stack(
+                [
+                    torch.floor(points[..., 0]),
+                    torch.ceil(points[..., 1]),
+                    torch.ceil(points[..., 2])
+                ],
+                dim=-1
+            ),
+            torch.stack(
+                [
+                    torch.ceil(points[..., 0]),
+                    torch.ceil(points[..., 1]),
+                    torch.ceil(points[..., 2])
+                ],
+                dim=-1
+            ),
+        ], dim=0).int()
+
+    def get_grid(self, xyz):
+        """get the neighboring xyz positionand grid coordinates"""
+
+        xyz_zeroed = xyz - self.min_coords
+        xyz_normalized = xyz_zeroed / self.voxel_size
+        grid_id = self.get_neighbors(xyz_normalized)
+        out_xyz = grid_id * self.voxel_size + self.min_coords
+        return out_xyz, grid_id
+
+    def parse_sdf(self, pts, sdf, direction):
+        """_summary_
+
+        Args:
+            pts (_type_): [N, 3]
+            sdf (_type_): [N]
+            direction (_type_): [N, 3]
+
+        Returns:
+            _type_: _description_
+        """
+
+        xyz, grid_id = self.get_grid(pts)  # [8, N, 3], [8, N, 3]
+        out_sdf = sdf.unsqueeze(0) - torch.sum((xyz - pts.unsqueeze(0)) * direction.unsqueeze(0), dim=-1)
+        return out_sdf, grid_id,  # [8, N], [8, N, 3]
+
+    def flatten(self, grid_id):
+        return grid_id[..., 0] * self.n_xyz[1] * self.n_xyz[2] + \
+            grid_id[..., 1] * self.n_xyz[2] + grid_id[..., 2]
+
+    def unflatten(self, flat_id):
+        x = torch.div(flat_id, (self.n_xyz[1] * self.n_xyz[2]), rounding_mode="floor")
+        rest = flat_id % (self.n_xyz[1] * self.n_xyz[2])
+        y = torch.div(rest, self.n_xyz[2], rounding_mode="floor")
+        z = flat_id - x * self.n_xyz[1] * self.n_xyz[2] - y * self.n_xyz[2]
+        return torch.stack([x, y, z], axis=-1)
+
+    def integrate(self, pts, sdf, dir):
+        out_sdf, grid_id = self.parse_sdf(pts, sdf, dir)
+        grid_id = grid_id.reshape(-1, 3)
+        out_sdf = out_sdf.reshape(1, -1)
+        flat_ids = self.flatten(grid_id)
+        unique_flat_ids, pinds, pcounts = torch.unique(flat_ids,
+                                                       return_inverse=True,
+                                                       return_counts=True)
+        unique_grid_ids = self.unflatten(unique_flat_ids)
+        assert torch.max(unique_grid_ids[..., 0]) < self.n_xyz[0]
+        assert torch.max(unique_grid_ids[..., 1]) < self.n_xyz[1]
+        assert torch.max(unique_grid_ids[..., 2]) < self.n_xyz[2]
+        assert torch.min(unique_grid_ids) >= 0
+        sdf_mean = scatter_mean(out_sdf, pinds)[0].unsqueeze(-1)
+        old_sdf, old_weights, _ = self.query(unique_grid_ids)
+        updated_weights = old_weights + 1
+        updated_sdf = (old_sdf * old_weights + sdf_mean) / updated_weights
+        self.insert(unique_grid_ids, updated_sdf, updated_weights, torch.ones_like(updated_weights))
+
+    def to_tensor(self):
+        """ store all active values to pytorch tensor
+        """
+
+        active_buf_indices = self.indexer.active_buf_indices().to(o3c.int64)
+        capacity = len(active_buf_indices)
+        self.tensor_indexer = o3c.HashMap(
+            capacity,
+            key_dtype=o3c.int64,
+            key_element_shape=(3,),
+            value_dtype=o3c.int64,
+            value_element_shape=(1,),
+            device=o3c.Device(self.device)
+        )
+
+        active_keys = self.indexer.key_tensor()[active_buf_indices].to(o3c.int64)
+        features = self.indexer.value_tensor(0)[active_buf_indices]
+        weights = self.indexer.value_tensor(1)[active_buf_indices]
+        num_hits = self.indexer.value_tensor(2)[active_buf_indices]
+
+        indexer_value = o3c.Tensor.from_dlpack(
+            torch.utils.dlpack.to_dlpack(
+                torch.arange(capacity, device=self.device)
+            )
+        )
+        buf_indices, masks = self.tensor_indexer.insert(active_keys, indexer_value)
+        masks = masks.cpu().numpy() if "cuda" in self.device else masks.numpy()
+        assert masks.all()
+
+        self.active_coordinates = torch.utils.dlpack.from_dlpack(active_keys.to_dlpack())
+        self.features = torch.utils.dlpack.from_dlpack(features.to_dlpack())
+        self.weights = torch.utils.dlpack.from_dlpack(weights.to_dlpack())
+        self.num_hits = torch.utils.dlpack.from_dlpack(num_hits.to_dlpack())
+
+        return self.active_coordinates, self.features, self.weights, self.num_hits
+
+    def insert(self, keys, new_feats, new_weights, new_num_hits):
+        """[summary]
+
+        Args:
+            keys ([type]): [description]
+            new_feats ([type]): [description]
+            new_weights ([type]): [description]
+            new_num_hits ([type]): [description]
+        """
+
+        if len(keys) == 0:
+            return None
+
+        o3c_keys = o3c.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(keys)).to(o3c.int64)
+        feats_o3c = o3c.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(new_feats))
+        weights_o3c = o3c.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(new_weights))
+        num_hits_o3c = o3c.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(new_num_hits))
+        buf_indices, masks_insert = self.indexer.insert(o3c_keys, (feats_o3c, weights_o3c, num_hits_o3c))
+        if not masks_insert.cpu().numpy().all():
+            existed_masks = masks_insert == False
+            existed_keys = o3c_keys[existed_masks]
+            buf_indices, masks_find = self.indexer.find(existed_keys)
+            assert masks_find.cpu().numpy().all()
+            self.indexer.value_tensor(0)[buf_indices.to(o3c.int64)] = feats_o3c[existed_masks]
+            self.indexer.value_tensor(1)[buf_indices.to(o3c.int64)] = weights_o3c[existed_masks]
+            self.indexer.value_tensor(2)[buf_indices.to(o3c.int64)] = num_hits_o3c[existed_masks]
+
+    def reset(self, capacity):
+        self.indexer = o3c.HashMap(
+            capacity,
+            key_dtype=o3c.int64,
+            key_element_shape=(3,),
+            value_dtypes=(o3c.Dtype.Float32, o3c.Dtype.Float32, o3c.Dtype.Float32),
+            value_element_shapes=((1,), (1,), (1,)),
+            device=self.o3c_device)            
+        # to be initialized in self.to_tensor
+        self.tensor_indexer = None
+        self.features = None
+        self.weights = None
+        self.num_hits = None
+        self.active_coordinates = None
+
+    def _query_tensor(self, keys):
+        """[summary]
+
+        Args:
+            keys ([torch.Tensor]): shape: [1, 8, B, N, 3]
+
+        Returns:
+            [type]: [description]
+        """
+        shapes = [s for s in keys.shape]
+        n_pts = np.asarray(shapes[:-1]).prod()
+        assert shapes[-1] == 3
+        out_feats = torch.zeros([n_pts, self.n_feats], device=self.device)
+        out_weights = torch.zeros([n_pts, 1], device=self.device)
+        out_num_hits = torch.zeros([n_pts, 1], device=self.device)
+
+        o3c_keys = o3c.Tensor.from_dlpack(
+            torch.utils.dlpack.to_dlpack(keys.reshape(-1, 3).long())
+        )
+        buf_indices, masks = self.tensor_indexer.find(o3c_keys)
+        buf_indices = buf_indices[masks]
+        indices = self.tensor_indexer.value_tensor()[buf_indices]
+        indices = torch.utils.dlpack.from_dlpack(
+            indices.to_dlpack())[:, 0]
+        masks_torch = torch.utils.dlpack.from_dlpack(masks.to(o3c.int64).to_dlpack()).bool()
+            
+        out_feats[masks_torch] = self.features[indices]
+        out_weights[masks_torch] = self.weights[indices]
+        out_num_hits[masks_torch] = self.num_hits[indices]
+        
+        out_feats = out_feats.reshape(shapes[:-1] + [self.n_feats])
+        out_weights = out_weights.reshape(shapes[:-1] + [1])
+        out_num_hits = out_num_hits.reshape(shapes[:-1] + [1])
+
+        return out_feats, out_weights, out_num_hits
+
+    def query(self, keys):
+        """[summary]
+
+        Args:
+            keys ([torch.Tensor]): shape: [..., 3]
+
+        Returns:
+            [type]: [description]
+        """
+        
+        shapes = [s for s in keys.shape]
+        n_pts = np.asarray(shapes[:-1]).prod()
+        assert shapes[-1] == 3
+        if n_pts == 0:
+            return None, None, None
+        
+        out_feats = torch.zeros((n_pts, self.n_feats), device=self.device) + self.truncated_dist
+        out_weights = torch.zeros((n_pts, 1), device=self.device)
+        out_num_hits = torch.zeros((n_pts, 1), device=self.device)
+        
+        o3c_keys = o3c.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(keys.reshape(-1, 3).long()))
+        buf_inds, masks = self.indexer.find(o3c_keys)
+        buf_inds = buf_inds[masks].to(o3c.int64)
+        if not len(buf_inds) == 0:
+            masks_torch = torch.utils.dlpack.from_dlpack(masks.to(o3c.int64).to_dlpack()).bool()
+            out_feats[masks_torch] = torch.utils.dlpack.from_dlpack(
+                self.indexer.value_tensor(0)[buf_inds].to_dlpack())
+            out_weights[masks_torch] = torch.utils.dlpack.from_dlpack(
+                self.indexer.value_tensor(1)[buf_inds].to_dlpack())
+            out_num_hits[masks_torch] = torch.utils.dlpack.from_dlpack(
+                self.indexer.value_tensor(2)[buf_inds].to_dlpack())
+            out_feats = out_feats.reshape(shapes[:-1] + [self.n_feats])
+            out_weights = out_weights.reshape(shapes[:-1] + [1])
+            out_num_hits = out_num_hits.reshape(shapes[:-1] + [1])
+        return out_feats, out_weights, out_num_hits
+
+    def meshlize(self, path=None):
+        """ create mesh from the implicit volume
+
+        Args:
+            nerf ([type]): [description]
+            path ([string]): the output mesh path
+        """
+
+        assert self.active_coordinates is not None, "call self.to_tensor() first."
+        active_pts = self.active_coordinates * self.voxel_size + self.min_coords
+        active_pts = active_pts.detach().cpu().numpy()
+        active_coords = self.active_coordinates.detach().cpu().numpy()
+        batch_size = 500
+        step_size = 0.5
+        level = 0.
+
+        all_vertices = []
+        all_faces = []
+        last_face_id = 0
+
+        for i in range(0, len(self.active_coordinates), batch_size):
+            origin = active_coords[i: i + batch_size]
+            n_batches = len(origin)
+            range_ = np.arange(0, 1+step_size, step_size) - 0.5
+            spacing = [range_[1] - range_[0]] * 3
+            voxel_coords = np.stack(
+                np.meshgrid(range_, range_, range_, indexing="ij"),
+                axis=-1
+            )
+            voxel_coords = np.tile(voxel_coords, (n_batches, 1, 1, 1, 1))
+            voxel_coords += origin[:, None, None, None, :]
+            voxel_coords = torch.from_numpy(
+                voxel_coords).float().to(self.device)
+            H, W, D = voxel_coords.shape[1:4]
+            voxel_coords = voxel_coords.reshape(1, n_batches, -1, 3)
+            out = self.decode_pts(
+                voxel_coords,
+                is_coords=True
+            )
+            sdf = out[0, :, :, 0].reshape(n_batches, H, W, D)
+            sdf = sdf.detach().cpu().numpy()
+            for j in range(n_batches):
+                if np.max(sdf[j]) > level and np.min(sdf[j]) < level:
+                    verts, faces, normals, values = \
+                        marching_cubes(
+                            sdf[j],
+                            level=level,
+                            spacing=spacing
+                        )
+                    verts += origin[j] - 0.5
+                    all_vertices.append(verts)
+                    all_faces.append(faces + last_face_id)
+                    last_face_id += np.max(faces) + 1
+        if len(all_vertices) == 0:
+            return None
+        final_vertices = np.concatenate(all_vertices, axis=0)
+        final_faces = np.concatenate(all_faces, axis=0)
+        final_vertices = final_vertices * self.voxel_size + self.min_coords.cpu().numpy()
+        # all_normals = np.concatenate(all_normals, axis=0)
+        mesh = trimesh.Trimesh(
+            vertices=final_vertices,
+            faces=final_faces,
+            # vertex_normals=all_normals,
+            process=False
+        )
+        if path is not None:
+            mesh.export(path)
+        return active_pts, mesh
+
+    def decode_pts(
+        self,
+        coords,
+        is_coords=False,
+        query_tensor=True,
+    ):
+        """ decode sdf values from the implicit volume given coords.
+
+        Args:
+            coords (_type_): [1, 8, n_pts, 3], input pts.
+            nerf (_type_): _description_
+            voxel_size (_type_): _description_
+            sdf_delta (_type_, optional): _description_. Defaults to None.
+            is_coords (_type_, optional): True if input pts are in voxel coords.
+                Otherwise, they are in world coordinate that should be converted
+                to voxel coords first.
+            volume_resolution (_type_, optional): _description_. Defaults to None.
+
+        Returns:
+            _type_: _description_
+        """
+
+        if not is_coords:
+            coords = (coords - self.min_coords) / self.voxel_size
+        neighbor_coords = get_neighbors(coords)
+        local_coords = coords.unsqueeze(1) - neighbor_coords
+        assert torch.min(local_coords) >= -1
+        assert torch.max(local_coords) <= 1
+        weights_unmasked = torch.prod(
+            1 - torch.abs(local_coords),
+            dim=-1,
+            keepdim=True
+        )
+        normalizer = torch.sum(weights_unmasked, dim=1, keepdim=True)
+        weights_unmasked = weights_unmasked / normalizer
+
+        # get features from coords
+        if query_tensor:
+            feats, weights, num_hits = self._query_tensor(neighbor_coords)
+        else:
+            feats, weights, num_hits = self.query(neighbor_coords)
+        feats = torch.sum(feats * weights_unmasked, dim=1)
+        return feats
+
+    def save(self, path):
+        active_buf_indices = self.tensor_indexer.active_buf_indices().to(o3c.int64)
+
+        active_keys = self.tensor_indexer.key_tensor()[active_buf_indices]
+        active_keys = torch.utils.dlpack.from_dlpack(active_keys.to_dlpack())
+        
+        active_vals = self.tensor_indexer.value_tensor()[active_buf_indices]
+        active_vals = torch.utils.dlpack.from_dlpack(active_vals.to_dlpack())
+
+        out_dict = {
+            "dimensions": self.dimensions,
+            "voxel_size": self.voxel_size,
+            "active_keys": active_keys,
+            "active_vals": active_vals,
+            "features": self.features,
+            "weights": self.weights,
+            "num_hits": self.num_hits,
+            "active_coordinates": self.active_coordinates
+        }
+        torch.save(out_dict, path + "_sparse_volume.pth")
+
+    def load(self, path):
+        volume = torch.load(path)
+        active_keys = volume['active_keys']
+        active_vals = volume['active_vals']
+        features = volume['features']
+        weights = volume['weights']
+        num_hits = volume['num_hits']
+        active_coordinates = volume['active_coordinates']
+
+        self.tensor_indexer = o3c.HashMap(
+            len(active_keys),
+            key_dtype=o3c.int64,
+            key_element_shape=(3,),
+            value_dtype=o3c.int64,
+            value_element_shape=(1,),
+            device=o3c.Device(self.device)
+        )
+        active_keys = o3c.Tensor.from_dlpack(
+            torch.utils.dlpack.to_dlpack(active_keys))
+        active_vals = o3c.Tensor.from_dlpack(
+            torch.utils.dlpack.to_dlpack(active_vals))
+
+        buf_indices, masks = self.tensor_indexer.insert(
+            active_keys, active_vals)
+        masks = masks.cpu().numpy() if "cuda" in self.device else masks.numpy()
+        assert masks.all()
+
+        self.active_coordinates = active_coordinates
+        self.features = features
+        self.weights = weights
+        self.num_hits = num_hits
 
 
 class SparseVolume:
@@ -337,8 +806,7 @@ class SparseVolume:
             feats, weights, num_hits = self._query_tensor(neighbor_coords)
         else:
             feats, weights, num_hits = self.query(neighbor_coords)
-        mask = torch.min(weights, dim=1)[0] > self.min_pts_in_grid
-
+        mask = torch.min(weights, dim=1)[0] >= self.min_pts_in_grid
         local_coords_encoded = nerf.xyz_encoding(local_coords)
         nerf_in = torch.cat([local_coords_encoded, feats], dim=-1)
         alpha = nerf.geo_forward(nerf_in)
@@ -347,6 +815,7 @@ class SparseVolume:
         weights_unmasked = weights_unmasked / normalizer
         assert torch.all(torch.abs(weights_unmasked.sum(1) - 1) < 1e-5)
         alpha = torch.sum(alpha * weights_unmasked, dim=1)
+        alpha = torch.where(mask, alpha, torch.zeros_like(alpha)+self.voxel_size)
         if sdf_delta is not None:
             neighbor_coords_grid_sample = neighbor_coords / (self.n_xyz-1)
             neighbor_coords_grid_sample = neighbor_coords_grid_sample * 2 - 1
