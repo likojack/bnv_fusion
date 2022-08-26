@@ -30,6 +30,19 @@ You will need to the [torch-scatter](https://github.com/rusty1s/pytorch_scatter)
 Alternatively, you can build a docker image using the DockerFile provided (Work in progress. We can't get the Open3D working within the docker image. Any help is appreciated!).
 
 
+**New: Running with sequences captured by Iphone/Ipad**
+------
+We are happy to share that you can run BNV-Fusion reasonably easily on any sequences you captured using an iOS device with a lidar sensor (e.g., iPhone 12/13 Pro, iPad Pro). The instructions are as follows:
+1. Download the [3D scanner app](https://apps.apple.com/us/app/3d-scanner-app/id1419913995) to an iOS device.
+2. You can then capture a sequence using this app.
+3. After recoding, you need to transfer the raw data (e.g., depth images, camera poses) to a desktop with a GPU. To do this, tap "scans" at the bottom left of the app. Select "Share Model" after clicking the "..." button. There are various formats you can use to share the data, but what we need is the raw data, so select "All Data". You can then choose your favorite way, such as google drive, for sharing. 
+4. After you unpack the data at your desktop, run BNV-Fusion using the following command:
+```
+python src/run_e2e.py model=fusion_pointnet_model dataset=fusion_inference_dataset_arkit trainer.checkpoint=$PWD/pretrained/pointnet_tcnn.ckpt 'dataset.scan_id="xxxxx"' dataset.data_dir=yyyyy model.tcnn_config=$PWD/src/models/tcnn_config.json
+```
+Obviously, you need to specify the scan_id and where you hold the data. You should be able to see the reconstruction provided by BNV-Fusion after this step. Hope you have fun!
+
+
 ## Datasets and pretrained models
 We tested BVF-Fusion on three datasets: 3D scene, ICL-NUIM, and ScanNet. Please go to the respective dataset repos to download data.
 After downloading the data, run preprocessing scripts: 
@@ -59,10 +72,10 @@ python src/script/run_inference_on_scene3d.py
 
 To process a sequence, use the following command:
 ```
-python src/run_e2e.py model=fusion_pointnet_model dataset=fusion_inference_dataset dataset.scan_id="scene3d/lounge" trainer.checkpoint=$PWD/pretrained/pointnet.ckpt model.tcnn_config=$PWD/src/models/tcnn_config.json model.mode="demo"
+python src/run_e2e.py model=fusion_pointnet_model dataset=fusion_inference_dataset dataset.scan_id="scene3d/lounge" trainer.checkpoint=$PWD/pretrained/pointnet_tcnn.ckpt model.tcnn_config=$PWD/src/models/tcnn_config.json model.mode="demo"
 ```
 
-# Training the embedding (optional)
+## Training the embedding (optional)
 Instead of using the pretrained model provided, you can also train the local embedding yourself by running the following command
 ```
 python src/train.py model=fusion_pointnet_modeldataset=fusion_pointnet_dataset model.voxel_size=0.01 model.min_pts_in_grid=8 model.train_ray_splits=1000 model.tcnn_config=$PWD/src/models/tcnn_config.json

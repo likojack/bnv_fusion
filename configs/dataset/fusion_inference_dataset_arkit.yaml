@@ -1,0 +1,22 @@
+data_dir: ${data_dir}  # data_dir is specified in config.yaml
+
+subdomain: "fusion"
+
+name: "fusion_inference_dataset_arkit"
+img_res: [192, 256]
+num_pixels: 5000
+scan_id: "OVERWRITE_THIS"
+skip_images: 1
+sample_shift: 0
+confidence_level: 2
+
+downsample_scale: 1.
+downsample_mode: null # or sparse
+train_batch_size: 1
+eval_batch_size: 1
+max_eval_imgs: 1
+shuffle: True
+num_workers: 8
+
+# for end-to-end
+depth_scale: 1000.
