@@ -73,7 +73,7 @@ class NeuralMap:
         self.frames = []
         self.iterable_dataset = IterableInferenceDataset(
             self.frames, self.ray_max_dist, self.bound_min.cpu(),
-            self.bound_max.cpu(), self.n_xyz, self.sampling_size)
+            self.bound_max.cpu(), self.n_xyz, self.sampling_size, config.dataset.confidence_level)
 
     def integrate(self, frame):
         if len(frame['input_pts']) == 0:
@@ -260,6 +260,8 @@ def main(config: DictConfig):
             "img_path": frame['img_path'][0],
             "depth_path": frame['depth_path'][0],
         }
+        if "mask_path" in frame:
+            meta_frame['mask_path'] = frame['mask_path'][0]
         del frame
         neural_map.frames.append(meta_frame)
         # clear memory for open3d hashmap
