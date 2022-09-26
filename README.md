@@ -29,6 +29,20 @@ You will need to the [torch-scatter](https://github.com/rusty1s/pytorch_scatter)
 
 Alternatively, you can build a docker image using the DockerFile provided (Work in progress. We can't get the Open3D working within the docker image. Any help is appreciated!).
 
+[IMPORTANT] Setup the PYTHONPATH before running the code:
+
+`
+export PYTHONPATH=$PYTHONPATH:$PWD
+`
+
+If you don't want to run this command everytime using a new terminal, you can also setup an alias in Bash to setup PYTHONPATH and activate the environment at one go as follows:
+
+`
+alias bnv_fusion="export PYTHONPATH=$PYTHONPATH:PROJECT_DIR;conda activate bnv_fusion"
+`
+
+PROJECT_DIR is the root directory of this repo.
+
 
 **New: Running with sequences captured by Iphone/Ipad**
 ------
