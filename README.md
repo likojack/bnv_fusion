@@ -44,7 +44,7 @@ alias bnv_fusion="export PYTHONPATH=$PYTHONPATH:PROJECT_DIR;conda activate bnv_f
 PROJECT_DIR is the root directory of this repo.
 
 
-**New: Running with sequences captured by Iphone/Ipad**
+**New: Running with sequences captured by iPhone/iPad**
 ------
 We are happy to share that you can run BNV-Fusion reasonably easily on any sequences you captured using an iOS device with a lidar sensor (e.g., iPhone 12/13 Pro, iPad Pro). The instructions are as follows:
 1. Download the [3D scanner app](https://apps.apple.com/us/app/3d-scanner-app/id1419913995) to an iOS device.
