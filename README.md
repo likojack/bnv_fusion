@@ -94,6 +94,16 @@ Instead of using the pretrained model provided, you can also train the local emb
 ```
 python src/train.py model=fusion_pointnet_modeldataset=fusion_pointnet_dataset model.voxel_size=0.01 model.min_pts_in_grid=8 model.train_ray_splits=1000 model.tcnn_config=$PWD/src/models/tcnn_config.json
 ```
+
+## FAQ
+- Do I have to have a rough mesh, as requested [here](https://github.com/likojack/bnv_fusion/blob/9178e8c36743d6bf9a7828087553d365f50a6d7f/src/datasets/fusion_inference_dataset.py#L253), when running with my own data?
+
+No, We only use the mesh to determin the dimensions of the sceen to be reconstructed. You can manually set the boundary if you know the dimensions.
+
+- How to set an appropriate voxel size?
+
+The reconstruction quality apparently depends on the voxel size. If the voxel size is too small, there won't be enough points within each local region for the local embedding. If it is too large, the system fail to recover fine details. Therefore, we select the ideal voxel size based on the number of 3D points in a voxel. You will get a statistic on 3D points used in the local embedding after running system (see [here](https://github.com/likojack/bnv_fusion/blob/9178e8c36743d6bf9a7828087553d365f50a6d7f/src/models/sparse_volume.py#L515)). Empirically, we found out that the voxel size satisfying the following requirements gives better results: 1) the ```min``` is larger than 4, and 2) the ```mean``` is ideally larger than 8.  
+
 ## Citation
 If you find our code or paper useful, please cite
 ```bibtex
