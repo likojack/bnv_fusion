@@ -89,6 +89,11 @@ To process a sequence, use the following command:
 python src/run_e2e.py model=fusion_pointnet_model dataset=fusion_inference_dataset dataset.scan_id="scene3d/lounge" trainer.checkpoint=$PWD/pretrained/pointnet_tcnn.ckpt model.tcnn_config=$PWD/src/models/tcnn_config.json model.mode="demo"
 ```
 
+## Evaluation
+The results and GT meshes are availalbe here: https://drive.google.com/drive/folders/1gzsOIuCrj7ydX2-XXULQ61KjtITipYb5?usp=sharing
+
+After downloading the data, you can run evaluation using the ```evaluate_bnvf.py```.
+
 ## Training the embedding (optional)
 Instead of using the pretrained model provided, you can also train the local embedding yourself by running the following command
 ```
